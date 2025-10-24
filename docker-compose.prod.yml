@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  client:
+    environment:
+      NODE_ENV: production
+    command: ["npm", "run", "start"]
+    volumes: []
+    restart: always
+
+  server:
+    environment:
+      NODE_ENV: production
+    command: ["npm", "run", "start"]
+    volumes: []
+    restart: always
+
+  mongo:
+    restart: always
