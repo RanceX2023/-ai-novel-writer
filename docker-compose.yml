@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    image: ${CLIENT_IMAGE:-ai-novel-client}
+    container_name: ${CLIENT_IMAGE:-ai-novel-client}
+    ports:
+      - "${CLIENT_PORT:-5173}:5173"
+    env_file:
+      - ./client/.env
+    depends_on:
+      - server
+    volumes:
+      - ./client:/app
+      - client-node-modules:/app/node_modules
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: ${SERVER_IMAGE:-ai-novel-server}
+    container_name: ${SERVER_IMAGE:-ai-novel-server}
+    ports:
+      - "${SERVER_PORT:-4000}:4000"
+    env_file:
+      - ./server/.env
+    volumes:
+      - ./server:/app
+      - server-node-modules:/app/node_modules
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:6.0
+    container_name: mongo
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-changeme}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-ai_novel_writer}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh \"mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin\" --quiet --eval 'db.runCommand({ ping: 1 })'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  client-node-modules:
+  server-node-modules:
