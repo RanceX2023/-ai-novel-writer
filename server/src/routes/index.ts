@@ -9,7 +9,19 @@ import {
   revertChapterVersion,
   updateChapter,
 } from '../controllers/chapterController';
-import { createProject, getProjectEditorContext, listProjects, saveProjectStyle } from '../controllers/projectController';
+import {
+  createProject,
+  getProjectEditorContext,
+  getProjectStyle,
+  listProjects,
+  saveProjectStyle,
+} from '../controllers/projectController';
+import {
+  createCharacter,
+  deleteCharacter,
+  listCharacters,
+  updateCharacter,
+} from '../controllers/characterController';
 import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
 import { streamJob } from '../controllers/streamController';
 import {
@@ -45,6 +57,7 @@ import {
   plotSuggestionSchema,
 } from '../validators/plot';
 import { projectCreateSchema, projectStyleSchema } from '../validators/project';
+import { characterCreateSchema, characterUpdateSchema } from '../validators/character';
 import {
   outlineGenerateSchema,
   outlineNodeUpsertSchema,
@@ -55,7 +68,17 @@ const router = Router();
 
 router.get('/projects', listProjects);
 router.post('/projects', validateBody(projectCreateSchema), createProject);
+router.get('/projects/:projectId/style', getProjectStyle);
 router.post('/projects/:projectId/style', validateBody(projectStyleSchema), saveProjectStyle);
+
+router.get('/projects/:projectId/characters', listCharacters);
+router.post('/projects/:projectId/characters', validateBody(characterCreateSchema), createCharacter);
+router.patch(
+  '/projects/:projectId/characters/:characterId',
+  validateBody(characterUpdateSchema),
+  updateCharacter
+);
+router.delete('/projects/:projectId/characters/:characterId', deleteCharacter);
 
 router.post(
   '/projects/:projectId/outline/generate',

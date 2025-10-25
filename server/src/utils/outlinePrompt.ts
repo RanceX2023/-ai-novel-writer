@@ -10,24 +10,30 @@ export interface OutlinePromptOptions extends OutlineGenerateInput {
 }
 
 function formatStyleProfile(style?: PromptStyleProfile, strength?: number): string {
+  const intensity = strength ?? style?.styleStrength;
+
   if (!style || Object.keys(style).length === 0) {
-    return strength !== undefined
-      ? `未提供详细风格设定，整体风格强度约为 ${(strength * 100).toFixed(0)}%。`
+    return intensity !== undefined
+      ? `未提供详细风格设定，整体风格强度约为 ${(intensity * 100).toFixed(0)}%。`
       : '未提供详细风格设定，可综合常见长篇小说节奏与语气。';
   }
 
   const segments: string[] = [];
-  if (style.genre) segments.push(`类型：${style.genre}`);
+  if (style.name) segments.push(`风格配置：${style.name}`);
   if (style.tone) segments.push(`语气：${style.tone}`);
-  if (style.mood) segments.push(`情绪：${style.mood}`);
   if (style.pacing) segments.push(`节奏：${style.pacing}`);
   if (style.pov) segments.push(`视角：${style.pov}`);
+  if (style.diction) segments.push(`用词：${style.diction}`);
+  if (style.authors?.length) segments.push(`参考作者：${style.authors.join('、')}`);
   if (style.voice) segments.push(`叙述声音：${style.voice}`);
+  if (style.mood) segments.push(`情绪：${style.mood}`);
+  if (style.genre) segments.push(`类型：${style.genre}`);
   if (style.language) segments.push(`语言要求：${style.language}`);
+  if (style.notes) segments.push(`写作备注：${style.notes}`);
   if (style.instructions) segments.push(`额外指令：${style.instructions}`);
 
-  if (strength !== undefined) {
-    segments.push(`风格执行强度：约 ${(strength * 100).toFixed(0)}%。`);
+  if (intensity !== undefined) {
+    segments.push(`风格执行强度：约 ${(intensity * 100).toFixed(0)}%。`);
   }
 
   return segments.join('；');

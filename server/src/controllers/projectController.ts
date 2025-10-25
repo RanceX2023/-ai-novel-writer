@@ -17,13 +17,14 @@ function normaliseStyleProfile(style?: ProjectStyleProfile | null) {
     return null;
   }
   return {
-    genre: style.genre ?? null,
     tone: style.tone ?? null,
     pacing: style.pacing ?? null,
     pov: style.pov ?? null,
-    voice: style.voice ?? null,
+    diction: style.diction ?? null,
+    authors: Array.isArray(style.authors) ? style.authors.filter(Boolean) : [],
+    styleStrength: typeof style.styleStrength === 'number' ? style.styleStrength : null,
     language: style.language ?? null,
-    instructions: style.instructions ?? null,
+    notes: style.notes ?? null,
   };
 }
 
@@ -85,14 +86,24 @@ export const saveProjectStyle = async (req: Request, res: Response, next: NextFu
       throw new ApiError(404, 'Project not found');
     }
 
+    const authors = Array.isArray(payload.authors)
+      ? payload.authors.map((author) => author.trim()).filter(Boolean)
+      : [];
+    const styleStrength =
+      typeof payload.styleStrength === 'number'
+        ? Math.min(Math.max(payload.styleStrength, 0), 1)
+        : project.styleProfile?.styleStrength;
+
     project.styleProfile = {
-      genre: payload.genre,
       tone: payload.tone,
       pacing: payload.pacing,
       pov: payload.pov,
-      voice: payload.voice ?? undefined,
+      diction: payload.diction,
+      authors,
+      styleStrength,
       language: payload.language ?? '中文',
-      instructions: payload.instructions ?? undefined,
+      notes: payload.notes ?? undefined,
+      additional: project.styleProfile?.additional ?? undefined,
     };
 
     await project.save();
@@ -100,6 +111,22 @@ export const saveProjectStyle = async (req: Request, res: Response, next: NextFu
     const saved = project.toObject();
     res.json({
       project: serialiseProject(saved as SerializableProject),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getProjectStyle = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const projectId = ensureObjectId(req.params.projectId, 'projectId');
+    const project = await ProjectModel.findById(projectId).select({ styleProfile: 1 });
+    if (!project) {
+      throw new ApiError(404, 'Project not found');
+    }
+
+    res.json({
+      style: normaliseStyleProfile(project.styleProfile ?? null),
     });
   } catch (error) {
     next(error);

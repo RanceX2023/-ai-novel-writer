@@ -7,10 +7,11 @@ import ProjectModel, { ProjectDocument, StyleProfile as ProjectStyleProfile } fr
 import OutlineNodeModel, { OutlineNode as StoredOutlineNode } from '../models/OutlineNode';
 import MemoryModel from '../models/Memory';
 import StyleProfileModel, { StyleProfileAttributes, StyleProfileDocument } from '../models/StyleProfile';
+import CharacterModel, { CharacterAttributes } from '../models/Character';
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
-import { PromptMemoryFragment, PromptOutlineNode, PromptStyleProfile } from '../utils/promptTemplates';
+import { PromptCharacter, PromptMemoryFragment, PromptOutlineNode, PromptStyleProfile } from '../utils/promptTemplates';
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const TARGET_PARAGRAPH_TOKEN_ESTIMATE = 80;
@@ -114,6 +115,7 @@ class GenerationService {
 
     const styleProfile = await this.resolveStyleProfile(project, payload.styleProfileId, payload.styleOverride);
     const memoryFragments = await this.resolveMemoryFragments(project, payload.memoryIds, payload.memoryFragments);
+    const characters = await this.resolveCharacters(project, payload.characterIds);
 
     const job = await GenJobModel.create({
       project: project._id,
@@ -123,6 +125,7 @@ class GenerationService {
         outlineNodeId: outlineNode.nodeId,
         styleProfileId: payload.styleProfileId,
         memoryIds: payload.memoryIds,
+        characterIds: payload.characterIds,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
         model: payload.model,
@@ -140,6 +143,7 @@ class GenerationService {
         outlineNode: this.normaliseOutlineNode(outlineNode),
         additionalOutline,
         memoryFragments,
+        characters,
         styleProfile,
         continuation: false,
         targetLength: payload.targetLength,
@@ -157,6 +161,7 @@ class GenerationService {
         outlineNode,
         context: {
           memoryFragments,
+          characters,
           styleProfile,
         },
         content: streamResult.content,
@@ -207,6 +212,7 @@ class GenerationService {
 
     const styleProfile = await this.resolveStyleProfile(project, payload.styleProfileId, payload.styleOverride);
     const memoryFragments = await this.resolveMemoryFragments(project, payload.memoryIds, payload.memoryFragments);
+    const characters = await this.resolveCharacters(project, payload.characterIds);
 
     const job = await GenJobModel.create({
       project: project._id,
@@ -217,6 +223,7 @@ class GenerationService {
         outlineNodeId: outlineNode?.nodeId ?? null,
         styleProfileId: payload.styleProfileId,
         memoryIds: payload.memoryIds,
+        characterIds: payload.characterIds,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
         model: payload.model,
@@ -235,6 +242,7 @@ class GenerationService {
         outlineNode: outlineNode ? this.normaliseOutlineNode(outlineNode) : undefined,
         additionalOutline,
         memoryFragments,
+        characters,
         styleProfile,
         continuation: true,
         previousSummary: this.summariseText(chapter.content),
@@ -251,6 +259,7 @@ class GenerationService {
         continuation: streamResult.content,
         context: {
           memoryFragments,
+          characters,
           styleProfile,
         },
       });
@@ -667,6 +676,41 @@ class GenerationService {
     return result.slice(0, 50);
   }
 
+  private async resolveCharacters(
+    project: ProjectDocument,
+    characterIds?: string[]
+  ): Promise<PromptCharacter[]> {
+    if (!characterIds?.length) {
+      return [];
+    }
+
+    const docs = await CharacterModel.find({
+      _id: { $in: characterIds },
+      project: project._id,
+    })
+      .lean<(CharacterAttributes & { _id: Types.ObjectId })[]>();
+
+    const byId = new Map(docs.map((doc) => [doc._id.toString(), doc]));
+    return characterIds
+      .map((id) => byId.get(id))
+      .filter((doc): doc is CharacterAttributes & { _id: Types.ObjectId } => Boolean(doc))
+      .map((doc) => this.fromStoredCharacter(doc));
+  }
+
+  private fromStoredCharacter(character: CharacterAttributes & { _id?: Types.ObjectId }): PromptCharacter {
+    return {
+      id: character._id ? character._id.toString() : undefined,
+      name: character.name,
+      role: character.role || undefined,
+      background: character.background || undefined,
+      goals: character.goals || undefined,
+      conflicts: character.conflicts || undefined,
+      quirks: character.quirks || undefined,
+      voice: character.voice || undefined,
+      notes: character.notes || undefined,
+    };
+  }
+
   private fromStoredMemory(doc: { key: string; content: string; type?: string; weight?: number }): PromptMemoryFragment {
     const type = (doc.type as PromptMemoryFragment['type']) ?? 'fact';
     const labelMap: Record<string, string> = {
@@ -705,7 +749,7 @@ class GenerationService {
     styleProfileId?: string,
     overrides?: StyleOverrideInput
   ): Promise<PromptStyleProfile | undefined> {
-    const baseProfile: PromptStyleProfile = project.styleProfile
+    const base: (PromptStyleProfile & { name?: string }) = project.styleProfile
       ? this.fromProjectStyleProfile(project.styleProfile)
       : {};
 
@@ -714,50 +758,121 @@ class GenerationService {
       if (!styleProfileDoc) {
         throw new ApiError(404, 'Style profile not found for project');
       }
-      Object.assign(baseProfile, this.fromStoredStyleProfile(styleProfileDoc));
+      Object.assign(base, this.fromStoredStyleProfile(styleProfileDoc));
     }
 
     if (overrides) {
-      Object.assign(baseProfile, overrides);
+      if (overrides.tone !== undefined) {
+        base.tone = overrides.tone?.trim() || undefined;
+      }
+      if (overrides.pacing !== undefined) {
+        base.pacing = overrides.pacing?.trim() || undefined;
+      }
+      if (overrides.pov !== undefined) {
+        base.pov = overrides.pov?.trim() || undefined;
+      }
+      if (overrides.diction !== undefined) {
+        base.diction = overrides.diction?.trim() || undefined;
+      }
+      if (overrides.authors) {
+        base.authors = overrides.authors.map((author) => author.trim()).filter(Boolean);
+      }
+      if (overrides.language !== undefined) {
+        base.language = overrides.language?.trim() || undefined;
+      }
+      if (overrides.notes !== undefined) {
+        base.notes = overrides.notes?.trim() || undefined;
+      }
+      if (overrides.instructions !== undefined) {
+        base.instructions = overrides.instructions?.trim() || undefined;
+      }
+      if (typeof overrides.styleStrength === 'number') {
+        base.styleStrength = overrides.styleStrength;
+      } else if (typeof overrides.strength === 'number') {
+        base.styleStrength = overrides.strength;
+      }
     }
 
-    if (Object.keys(baseProfile).length === 0) {
+    const hasDetail =
+      (base.tone && base.tone.trim())
+      || (base.pacing && base.pacing.trim())
+      || (base.pov && base.pov.trim())
+      || (base.diction && base.diction.trim())
+      || (base.authors && base.authors.length > 0)
+      || typeof base.styleStrength === 'number'
+      || (base.instructions && base.instructions.trim())
+      || (base.notes && base.notes.trim());
+
+    const language = base.language?.trim();
+
+    if (!hasDetail && !language) {
       return undefined;
     }
 
-    if (!baseProfile.language) {
-      baseProfile.language = '中文';
+    const normalised: PromptStyleProfile & { name?: string } = {};
+
+    if (base.tone?.trim()) {
+      normalised.tone = base.tone.trim();
+    }
+    if (base.pacing?.trim()) {
+      normalised.pacing = base.pacing.trim();
+    }
+    if (base.pov?.trim()) {
+      normalised.pov = base.pov.trim();
+    }
+    if (base.diction?.trim()) {
+      normalised.diction = base.diction.trim();
+    }
+    if (base.authors?.length) {
+      normalised.authors = base.authors.filter(Boolean);
+    }
+    if (typeof base.styleStrength === 'number') {
+      normalised.styleStrength = Math.min(Math.max(base.styleStrength, 0), 1);
+    }
+    if (base.instructions?.trim()) {
+      normalised.instructions = base.instructions.trim();
+    }
+    if (base.notes?.trim()) {
+      normalised.notes = base.notes.trim();
+    }
+    if ((base as { name?: string }).name) {
+      normalised.name = (base as { name?: string }).name;
     }
 
-    return baseProfile;
+    normalised.language = language || '中文';
+
+    return normalised;
   }
 
-  private fromProjectStyleProfile(style: ProjectStyleProfile): PromptStyleProfile {
+  private fromProjectStyleProfile(style: ProjectStyleProfile): PromptStyleProfile & { name?: string } {
     return {
-      tone: style.tone,
-      voice: style.voice,
-      mood: style.mood,
-      pacing: style.pacing,
-      pov: style.pov,
-      genre: style.genre,
-      instructions: style.instructions,
-      language: style.language || '中文',
+      tone: style.tone?.trim() || undefined,
+      pacing: style.pacing?.trim() || undefined,
+      pov: style.pov?.trim() || undefined,
+      diction: style.diction?.trim() || undefined,
+      authors: Array.isArray(style.authors)
+        ? style.authors.map((author) => author.trim()).filter(Boolean)
+        : undefined,
+      styleStrength: typeof style.styleStrength === 'number' ? style.styleStrength : undefined,
+      language: style.language?.trim() || undefined,
+      notes: style.notes?.trim() || undefined,
     };
   }
 
-  private fromStoredStyleProfile(profile: StyleProfileDocument | StyleProfileAttributes): PromptStyleProfile {
+  private fromStoredStyleProfile(profile: StyleProfileDocument | StyleProfileAttributes): PromptStyleProfile & { name?: string } {
     return {
       name: 'name' in profile ? profile.name : undefined,
-      tone: profile.tone,
-      voice: profile.voice,
-      mood: profile.mood,
-      pacing: profile.pacing,
-      pov: profile.pov,
-      genre: profile.genre,
-      instructions: profile.instructions,
-      strength: profile.strength,
-      language: profile.language,
-    } as PromptStyleProfile;
+      tone: profile.tone?.trim() || undefined,
+      pacing: profile.pacing?.trim() || undefined,
+      pov: profile.pov?.trim() || undefined,
+      diction: profile.diction?.trim() || undefined,
+      authors: Array.isArray(profile.authors)
+        ? profile.authors.map((author) => (typeof author === 'string' ? author.trim() : '')).filter(Boolean)
+        : undefined,
+      styleStrength: typeof profile.styleStrength === 'number' ? profile.styleStrength : undefined,
+      language: profile.language?.trim() || undefined,
+      notes: 'notes' in profile ? profile.notes?.trim() || undefined : undefined,
+    };
   }
 
   private async persistNewChapter({
@@ -774,6 +889,7 @@ class GenerationService {
     outlineNode: StoredOutlineNode;
     context: {
       memoryFragments: PromptMemoryFragment[];
+      characters: PromptCharacter[];
       styleProfile?: PromptStyleProfile;
     };
     content: string;
@@ -792,6 +908,7 @@ class GenerationService {
           metadata: {
             outlineNodeId: outlineNode.nodeId,
             memory: context.memoryFragments,
+            characters: context.characters,
             styleProfile: context.styleProfile,
           },
           job: jobId,
@@ -811,6 +928,7 @@ class GenerationService {
     continuation: string;
     context: {
       memoryFragments: PromptMemoryFragment[];
+      characters: PromptCharacter[];
       styleProfile?: PromptStyleProfile;
     };
   }) {
@@ -826,6 +944,7 @@ class GenerationService {
       delta: continuation,
       metadata: {
         memory: context.memoryFragments,
+        characters: context.characters,
         styleProfile: context.styleProfile,
       },
       job: jobId,
