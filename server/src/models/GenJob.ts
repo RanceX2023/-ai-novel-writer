@@ -23,6 +23,8 @@ export interface GenerationJob {
   cost?: number;
   currency?: string;
   progress: number;
+  metaValidationFailures?: number;
+  metaRetryDurationMs?: number;
   startedAt?: Date;
   completedAt?: Date;
   createdAt?: Date;
@@ -64,6 +66,8 @@ const GenJobSchema = new Schema<GenerationJob>(
     cost: { type: Number, default: 0 },
     currency: { type: String, default: 'USD' },
     progress: { type: Number, default: 0 },
+    metaValidationFailures: { type: Number, default: 0 },
+    metaRetryDurationMs: { type: Number, default: 0 },
     startedAt: { type: Date },
     completedAt: { type: Date },
   },

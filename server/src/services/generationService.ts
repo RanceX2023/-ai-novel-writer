@@ -12,12 +12,38 @@ import CharacterModel, { CharacterAttributes } from '../models/Character';
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
-import { PromptCharacter, PromptMemoryFragment, PromptOutlineNode, PromptStyleProfile } from '../utils/promptTemplates';
+import { chapterMetaJsonSchema, chapterMetaSchema, ChapterMeta } from '../validators/chapterMeta';
+import {
+  buildChapterMetaPrompt,
+  PromptCharacter,
+  PromptMemoryFragment,
+  PromptOutlineNode,
+  PromptStyleProfile,
+} from '../utils/promptTemplates';
 import baseLogger from '../utils/logger';
+import { jsonrepair } from 'jsonrepair';
+import { ZodError } from 'zod';
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const TARGET_PARAGRAPH_TOKEN_ESTIMATE = 80;
 const CHARACTER_TOKEN_RATIO = 3.2;
+
+class ChapterMetaParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChapterMetaParseError';
+  }
+}
+
+class ChapterMetaValidationError extends Error {
+  issues: string[];
+
+  constructor(message: string, issues: string[]) {
+    super(message);
+    this.name = 'ChapterMetaValidationError';
+    this.issues = issues;
+  }
+}
 
 type TargetLengthInput = { unit: 'characters' | 'paragraphs'; value: number } | undefined;
 type StyleOverrideInput =
@@ -239,36 +265,80 @@ class GenerationService {
     const additionalOutline = this.buildAdditionalOutline(outlineNodes, outlineNode);
 
     this.executeJob(job._id.toString(), async ({ job, signal }) => {
-      const chapterTitle = outlineNode.title || (await this.generateChapterTitle(project._id));
-      const promptOptions: StreamChapterOptions = {
-        projectTitle: project.name,
-        synopsis: project.synopsis,
-        chapterTitle,
-        outlineNode: this.normaliseOutlineNode(outlineNode),
+      const baseChapterTitle = outlineNode.title || (await this.generateChapterTitle(project._id));
+      const planning = await this.prepareChapterPlan({
+        job,
+        project,
+        outlineNode,
         additionalOutline,
         memoryFragments,
         characters,
         styleProfile,
         continuation: false,
+        previousSummary: undefined,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
         model: payload.model,
+      });
+
+      const effectiveStyleProfile = planning.styleProfile ?? styleProfile;
+      const effectiveTargetLength = planning.targetLength ?? payload.targetLength;
+      const resolvedChapterTitle = planning.meta.outline.title?.trim() || baseChapterTitle;
+
+      const metadata = (job.metadata && typeof job.metadata === 'object')
+        ? { ...(job.metadata as Record<string, unknown>) }
+        : {};
+      metadata.planning = {
+        meta: planning.meta,
+        fallback: planning.usedFallback,
+        targetLength: effectiveTargetLength,
+      };
+      if (effectiveStyleProfile) {
+        metadata.styleProfileResolved = effectiveStyleProfile;
+      }
+      job.metadata = metadata;
+      job.markModified('metadata');
+
+      job.metaValidationFailures = planning.failures;
+      job.metaRetryDurationMs = planning.retryDurationMs;
+
+      this.emit(job._id.toString(), 'meta', {
+        meta: planning.meta,
+        targetLength: effectiveTargetLength,
+        fallback: planning.usedFallback,
+      });
+
+      const promptOptions: StreamChapterOptions = {
+        projectTitle: project.name,
+        synopsis: project.synopsis,
+        chapterTitle: resolvedChapterTitle,
+        outlineNode: this.normaliseOutlineNode(outlineNode),
+        additionalOutline,
+        memoryFragments,
+        characters,
+        styleProfile: effectiveStyleProfile,
+        continuation: false,
+        targetLength: effectiveTargetLength,
+        instructions: payload.instructions,
+        model: payload.model,
+        chapterMeta: planning.meta,
         signal,
       };
 
-      const streamResult = await this.streamAndCollect(job, promptOptions, payload.targetLength);
+      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength);
 
       const chapterDoc = await this.persistNewChapter({
         projectId: project._id,
         jobId: job._id,
-        chapterTitle,
+        chapterTitle: resolvedChapterTitle,
         outlineNode,
         context: {
           memoryFragments,
           characters,
-          styleProfile,
+          styleProfile: effectiveStyleProfile,
         },
         content: streamResult.content,
+        meta: planning.meta,
       });
 
       job.chapter = chapterDoc._id;
@@ -276,6 +346,7 @@ class GenerationService {
         chapterId: chapterDoc._id,
         version: 1,
         content: chapterDoc.content,
+        meta: planning.meta,
       };
       if (streamResult.requestId) {
         resultPayload.requestId = streamResult.requestId;
@@ -286,7 +357,7 @@ class GenerationService {
       await this.triggerMemorySync({
         project,
         chapterId: chapterDoc._id,
-        chapterTitle,
+        chapterTitle: resolvedChapterTitle,
         content: chapterDoc.content ?? streamResult.content,
         chapterOrder: chapterDoc.order ?? undefined,
       });
@@ -350,6 +421,48 @@ class GenerationService {
       : this.buildRootOutlineContext(outlineNodes);
 
     this.executeJob(job._id.toString(), async ({ job, signal }) => {
+      const previousSummary = this.summariseText(chapter.content);
+      const planning = await this.prepareChapterPlan({
+        job,
+        project,
+        outlineNode,
+        additionalOutline,
+        memoryFragments,
+        characters,
+        styleProfile,
+        continuation: true,
+        previousSummary,
+        targetLength: payload.targetLength,
+        instructions: payload.instructions,
+        model: payload.model,
+      });
+
+      const effectiveStyleProfile = planning.styleProfile ?? styleProfile;
+      const effectiveTargetLength = planning.targetLength ?? payload.targetLength;
+
+      const metadata = (job.metadata && typeof job.metadata === 'object')
+        ? { ...(job.metadata as Record<string, unknown>) }
+        : {};
+      metadata.planning = {
+        meta: planning.meta,
+        fallback: planning.usedFallback,
+        targetLength: effectiveTargetLength,
+      };
+      if (effectiveStyleProfile) {
+        metadata.styleProfileResolved = effectiveStyleProfile;
+      }
+      job.metadata = metadata;
+      job.markModified('metadata');
+
+      job.metaValidationFailures = planning.failures;
+      job.metaRetryDurationMs = planning.retryDurationMs;
+
+      this.emit(job._id.toString(), 'meta', {
+        meta: planning.meta,
+        targetLength: effectiveTargetLength,
+        fallback: planning.usedFallback,
+      });
+
       const promptOptions: StreamChapterOptions = {
         projectTitle: project.name,
         synopsis: project.synopsis,
@@ -358,16 +471,17 @@ class GenerationService {
         additionalOutline,
         memoryFragments,
         characters,
-        styleProfile,
+        styleProfile: effectiveStyleProfile,
         continuation: true,
-        previousSummary: this.summariseText(chapter.content),
-        targetLength: payload.targetLength,
+        previousSummary,
+        targetLength: effectiveTargetLength,
         instructions: payload.instructions,
         model: payload.model,
+        chapterMeta: planning.meta,
         signal,
       };
 
-      const streamResult = await this.streamAndCollect(job, promptOptions, payload.targetLength);
+      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength);
       const updatedChapter = await this.persistContinuation({
         chapter,
         jobId: job._id,
@@ -375,8 +489,9 @@ class GenerationService {
         context: {
           memoryFragments,
           characters,
-          styleProfile,
+          styleProfile: effectiveStyleProfile,
         },
+        meta: planning.meta,
       });
 
       const continuationResult: Record<string, unknown> = {
@@ -384,6 +499,7 @@ class GenerationService {
         version: updatedChapter.versions[updatedChapter.versions.length - 1]?.version,
         content: updatedChapter.content,
         delta: streamResult.content,
+        meta: planning.meta,
       };
       if (streamResult.requestId) {
         continuationResult.requestId = streamResult.requestId;
@@ -490,6 +606,348 @@ class GenerationService {
       this.jobControllers.delete(jobId);
       this.cancelledJobReasons.delete(jobId);
     });
+  }
+
+  private truncateMetaText(text: string, limit = 160): string {
+    const normalised = text?.replace(/\s+/g, ' ').trim();
+    if (!normalised) {
+      return '';
+    }
+    if (normalised.length <= limit) {
+      return normalised;
+    }
+    return `${normalised.slice(0, limit - 1)}…`;
+  }
+
+  private cloneStyleProfile(profile?: PromptStyleProfile): PromptStyleProfile | undefined {
+    if (!profile) {
+      return undefined;
+    }
+    return {
+      ...profile,
+      authors: Array.isArray(profile.authors) ? [...profile.authors] : profile.authors,
+    };
+  }
+
+  private adjustPlanningFallback(
+    styleProfile: PromptStyleProfile | undefined,
+    targetLength: TargetLengthInput,
+    level: number
+  ): { styleProfile?: PromptStyleProfile; targetLength?: TargetLengthInput } {
+    const nextStyle = this.cloneStyleProfile(styleProfile);
+    const nextTarget = targetLength ? { ...targetLength } : undefined;
+
+    if (nextStyle) {
+      if (level >= 1) {
+        if (typeof nextStyle.styleStrength === 'number') {
+          nextStyle.styleStrength = Math.min(nextStyle.styleStrength, 0.65);
+        } else {
+          nextStyle.styleStrength = 0.6;
+        }
+        if (nextStyle.authors && nextStyle.authors.length > 3) {
+          nextStyle.authors = nextStyle.authors.slice(0, 3);
+        }
+        if (nextStyle.instructions && nextStyle.instructions.length > 200) {
+          nextStyle.instructions = this.truncateMetaText(nextStyle.instructions, 200);
+        }
+      }
+
+      if (level >= 2) {
+        nextStyle.styleStrength = Math.min(nextStyle.styleStrength ?? 0.5, 0.5);
+        nextStyle.authors = nextStyle.authors ? nextStyle.authors.slice(0, 2) : nextStyle.authors;
+        nextStyle.notes = undefined;
+        nextStyle.instructions = undefined;
+      }
+    }
+
+    if (nextTarget) {
+      const reduceFactor = level >= 2 ? 0.75 : 0.85;
+      const minimum = nextTarget.unit === 'characters' ? 480 : 3;
+      nextTarget.value = Math.max(minimum, Math.round(nextTarget.value * reduceFactor));
+    }
+
+    if (level >= 3) {
+      return { styleProfile: undefined, targetLength: nextTarget };
+    }
+
+    return { styleProfile: nextStyle, targetLength: nextTarget };
+  }
+
+  private parseChapterMeta(payload: string): ChapterMeta {
+    const raw = payload?.trim();
+    if (!raw) {
+      throw new ChapterMetaParseError('章节元数据返回为空');
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      try {
+        const repaired = jsonrepair(raw);
+        parsed = JSON.parse(repaired);
+      } catch (repairError) {
+        throw new ChapterMetaParseError('章节元数据 JSON 解析失败');
+      }
+    }
+
+    try {
+      return chapterMetaSchema.parse(parsed);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        const issues = error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
+        throw new ChapterMetaValidationError('章节元数据未通过模式校验', issues);
+      }
+      throw error;
+    }
+  }
+
+  private buildFallbackChapterMeta({
+    outlineNode,
+    additionalOutline,
+    memoryFragments,
+    targetLength,
+    continuation,
+  }: {
+    outlineNode?: StoredOutlineNode | null;
+    additionalOutline: PromptOutlineNode[];
+    memoryFragments: PromptMemoryFragment[];
+    targetLength?: TargetLengthInput;
+    continuation: boolean;
+  }): ChapterMeta {
+    const normalisedOutline = outlineNode ? this.normaliseOutlineNode(outlineNode) : undefined;
+
+    const beatsSource = normalisedOutline?.beats?.length
+      ? normalisedOutline.beats
+      : additionalOutline.find((item) => item.beats && item.beats.length)?.beats
+        ?? [];
+
+    const beats: ChapterMeta['outline']['beats'] = beatsSource.map((beat, index) => ({
+      order: beat.order ?? index + 1,
+      title: beat.title || `节拍${index + 1}`,
+      summary: this.truncateMetaText(beat.summary || '补充描写，推进剧情。', 240),
+      focus: beat.focus || undefined,
+    }));
+
+    while (beats.length < 3) {
+      const order = beats.length + 1;
+      const templates = [
+        { title: '承接前情', summary: '承接上一章节的情节点，点明本章目标。' },
+        { title: '主要冲突推进', summary: '通过行动或对话推动冲突升级，揭示关键信息。' },
+        { title: '阶段性收束', summary: '给出当前冲突的阶段性结果，并埋下下一章节的悬念。' },
+      ];
+      const template = templates[Math.min(order - 1, templates.length - 1)];
+      beats.push({ order, title: template.title, summary: template.summary });
+    }
+
+    const scenes: ChapterMeta['scenes'] = beats.slice(0, Math.max(3, Math.min(5, beats.length))).map((beat, index) => ({
+      order: index + 1,
+      title: beat.title,
+      objective: beat.summary.length > 0 ? this.truncateMetaText(beat.summary, 200) : '推进剧情发展。',
+      beatRef: beat.order,
+    }));
+
+    while (scenes.length < 2 && beats[scenes.length]) {
+      const beat = beats[scenes.length];
+      scenes.push({
+        order: scenes.length + 1,
+        title: beat.title,
+        objective: this.truncateMetaText(beat.summary, 200),
+        beatRef: beat.order,
+      });
+    }
+
+    const tabooNotes = memoryFragments
+      .filter((fragment) => fragment.type === 'taboo')
+      .map((fragment) => this.truncateMetaText(fragment.content, 160))
+      .filter(Boolean)
+      .slice(0, 4);
+
+    const continuityChecklist = memoryFragments
+      .filter((fragment) => fragment.type && fragment.type !== 'taboo')
+      .map((fragment) => this.truncateMetaText(`${fragment.label}：保持${fragment.content}`, 200))
+      .filter(Boolean)
+      .slice(0, 5);
+
+    const fallbackTarget = targetLength
+      ? (() => {
+          const clampValue = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+          const lowerBound = targetLength.unit === 'characters' ? 360 : 3;
+          const upperBound = targetLength.unit === 'characters' ? 7000 : 20;
+          const step = targetLength.unit === 'characters' ? 200 : 1;
+          const baseMin = Math.max(lowerBound, Math.round(targetLength.value * 0.7));
+          const rawMin = Math.min(baseMin, upperBound - step);
+          const rawMaxCandidate = Math.min(
+            targetLength.unit === 'characters' ? 6800 : 12,
+            Math.round(targetLength.value * 1.2)
+          );
+          const ensuredMax = Math.min(upperBound, Math.max(rawMaxCandidate, rawMin + step));
+          const ideal = clampValue(targetLength.value, rawMin, ensuredMax);
+          return {
+            unit: targetLength.unit,
+            ideal,
+            min: rawMin,
+            max: ensuredMax,
+          };
+        })()
+      : undefined;
+
+    const outline: ChapterMeta['outline'] = {
+      title: normalisedOutline?.title || beats[0]?.title || '章节规划',
+      summary: normalisedOutline?.summary
+        ? this.truncateMetaText(normalisedOutline.summary, 300)
+        : beats[0]?.summary || '根据大纲推进剧情，保持节奏明确。',
+      beats,
+      tabooNotes: tabooNotes.length ? tabooNotes : undefined,
+    };
+
+    const meta: ChapterMeta = {
+      outline,
+      scenes,
+      closingStrategy: continuation
+        ? '承接上一章节冲突，使局势发生推进，并为下一章留下悬念。'
+        : '在主要冲突后形成阶段性结果，同时埋设下一章节的驱动力。',
+      continuityChecklist: continuityChecklist.length ? continuityChecklist : undefined,
+      targetLength: fallbackTarget,
+    };
+
+    return chapterMetaSchema.parse(meta);
+  }
+
+  private async prepareChapterPlan({
+    job,
+    project,
+    outlineNode,
+    additionalOutline,
+    memoryFragments,
+    characters,
+    styleProfile,
+    continuation,
+    previousSummary,
+    targetLength,
+    instructions,
+    model,
+  }: {
+    job: GenerationJobDocument;
+    project: ProjectDocument;
+    outlineNode?: StoredOutlineNode | null;
+    additionalOutline: PromptOutlineNode[];
+    memoryFragments: PromptMemoryFragment[];
+    characters: PromptCharacter[];
+    styleProfile?: PromptStyleProfile;
+    continuation: boolean;
+    previousSummary?: string;
+    targetLength?: TargetLengthInput;
+    instructions?: string;
+    model?: string;
+  }): Promise<{
+    meta: ChapterMeta;
+    styleProfile?: PromptStyleProfile;
+    targetLength?: TargetLengthInput;
+    failures: number;
+    retryDurationMs: number;
+    usedFallback: boolean;
+  }> {
+    const maxRetries = 2;
+    let effectiveStyle = this.cloneStyleProfile(styleProfile);
+    let effectiveTarget = targetLength ? { ...targetLength } : undefined;
+    let usedFallback = false;
+    let failures = 0;
+    let retryStart: number | null = null;
+    let meta: ChapterMeta | undefined;
+
+    const outlinePromptNode = outlineNode ? this.normaliseOutlineNode(outlineNode) : null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const prompt = buildChapterMetaPrompt({
+          projectTitle: project.name,
+          synopsis: project.synopsis,
+          outlineNode: outlinePromptNode,
+          additionalOutline,
+          memoryFragments,
+          characters,
+          continuation,
+          previousSummary,
+          targetLength: effectiveTarget,
+          instructions,
+          fallbackLevel: attempt,
+          model,
+        });
+
+        const response = await this.openAI.completeChat({
+          model: prompt.model,
+          temperature: prompt.temperature,
+          topP: prompt.topP,
+          presencePenalty: prompt.presencePenalty,
+          messages: prompt.messages,
+          responseFormat: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'chapter_meta_plan',
+              strict: true,
+              schema: chapterMetaJsonSchema,
+            },
+          } as Record<string, unknown>,
+          metadata: {
+            stage: 'chapter_planning',
+            projectId: project._id.toString(),
+            jobId: job._id.toString(),
+            continuation,
+          },
+        });
+
+        meta = this.parseChapterMeta(response.content);
+        break;
+      } catch (error) {
+        if (error instanceof ChapterMetaParseError || error instanceof ChapterMetaValidationError) {
+          failures += 1;
+          if (retryStart === null) {
+            retryStart = Date.now();
+          }
+          this.logger.warn({
+            jobId: job._id.toString(),
+            projectId: project._id.toString(),
+            attempt,
+            issues: error instanceof ChapterMetaValidationError ? error.issues : undefined,
+            message: error.message,
+          }, 'chapter planning validation failed');
+
+          if (attempt >= maxRetries) {
+            break;
+          }
+
+          usedFallback = true;
+          const adjustment = this.adjustPlanningFallback(effectiveStyle, effectiveTarget, attempt + 1);
+          effectiveStyle = adjustment.styleProfile;
+          effectiveTarget = adjustment.targetLength;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (!meta) {
+      usedFallback = true;
+      meta = this.buildFallbackChapterMeta({
+        outlineNode,
+        additionalOutline,
+        memoryFragments,
+        targetLength: effectiveTarget ?? targetLength,
+        continuation,
+      });
+    }
+
+    const retryDurationMs = retryStart !== null ? Date.now() - retryStart : 0;
+
+    return {
+      meta,
+      styleProfile: effectiveStyle ?? styleProfile,
+      targetLength: effectiveTarget ?? targetLength,
+      failures,
+      retryDurationMs,
+      usedFallback,
+    };
   }
 
   private async failJob(job: GenerationJobDocument, error: unknown, durationMs?: number, code?: string): Promise<void> {
@@ -1139,6 +1597,7 @@ class GenerationService {
     outlineNode,
     context,
     content,
+    meta,
   }: {
     projectId: Types.ObjectId;
     jobId: Types.ObjectId;
@@ -1150,6 +1609,7 @@ class GenerationService {
       styleProfile?: PromptStyleProfile;
     };
     content: string;
+    meta?: ChapterMeta;
   }) {
     const order = (await ChapterModel.countDocuments({ project: projectId })) + 1;
     return ChapterModel.create({
@@ -1167,6 +1627,7 @@ class GenerationService {
             memory: context.memoryFragments,
             characters: context.characters,
             styleProfile: context.styleProfile,
+            chapterMeta: meta,
           },
           job: jobId,
         },
@@ -1179,6 +1640,7 @@ class GenerationService {
     jobId,
     continuation,
     context,
+    meta,
   }: {
     chapter: Chapter;
     jobId: Types.ObjectId;
@@ -1188,6 +1650,7 @@ class GenerationService {
       characters: PromptCharacter[];
       styleProfile?: PromptStyleProfile;
     };
+    meta?: ChapterMeta;
   }) {
     const updatedContent = chapter.content
       ? `${chapter.content.trimEnd()}\n\n${continuation.trim()}`
@@ -1203,6 +1666,7 @@ class GenerationService {
         memory: context.memoryFragments,
         characters: context.characters,
         styleProfile: context.styleProfile,
+        chapterMeta: meta,
       },
       job: jobId,
     });
