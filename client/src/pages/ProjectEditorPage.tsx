@@ -314,8 +314,29 @@ const ProjectEditorPage = () => {
       const source = new EventSource(streamUrl, { withCredentials: true });
       eventSourceRef.current = source;
 
-      source.addEventListener('start', () => {
-        setStreamState((prev) => ({ ...prev, status: 'streaming' }));
+      source.addEventListener('start', (event) => {
+        let payload: { status?: string; progress?: number; tokensGenerated?: number } = {};
+        if (event.data) {
+          try {
+            payload = JSON.parse(event.data);
+          } catch {
+            payload = {};
+          }
+        }
+        let nextProgress: number | undefined;
+        if (payload.progress !== undefined) {
+          const numeric = Number(payload.progress);
+          if (!Number.isNaN(numeric)) {
+            nextProgress = Math.min(Math.max(numeric, 0), 100);
+          }
+        }
+        setStreamState((prev) => ({
+          ...prev,
+          status: 'streaming',
+          progress: nextProgress ?? prev.progress,
+          tokens: typeof payload.tokensGenerated === 'number' ? payload.tokensGenerated : prev.tokens,
+          error: undefined,
+        }));
       });
 
       source.addEventListener('delta', (event) => {
@@ -365,17 +386,25 @@ const ProjectEditorPage = () => {
 
       source.addEventListener('done', (event) => {
         let durationMs = startTimeRef.current ? Date.now() - startTimeRef.current : undefined;
+        let tokensGenerated: number | undefined;
         if (event.data) {
           try {
-            const data = JSON.parse(event.data) as { durationMs?: number };
+            const data = JSON.parse(event.data) as { durationMs?: number; tokensGenerated?: number };
             if (typeof data.durationMs === 'number') {
               durationMs = data.durationMs;
             }
-          } catch {
-            // ignore malformed payload
-          }
+            if (typeof data.tokensGenerated === 'number') {
+              tokensGenerated = data.tokensGenerated;
+            }
+          } catch {}
         }
-        setStreamState((prev) => ({ ...prev, status: 'completed', durationMs }));
+        setStreamState((prev) => ({
+          ...prev,
+          status: 'completed',
+          durationMs,
+          tokens: tokensGenerated ?? prev.tokens,
+          progress: 100,
+        }));
         source.close();
         eventSourceRef.current = null;
         streamBufferRef.current = '';
@@ -533,9 +562,11 @@ const ProjectEditorPage = () => {
       toast({ title: '正在生成', description: '请先停止当前任务或等待完成。', variant: 'info' });
       return;
     }
-    const payload = {
-      ...buildCommonPayload(),
-    };
+    const payload = buildCommonPayload();
+    if (!payload.targetLength) {
+      toast({ title: '请输入目标长度', description: '续写章节时需要设定目标长度。', variant: 'error' });
+      return;
+    }
     continueMutation.mutate(payload);
   }, [buildCommonPayload, continueMutation, projectId, selectedChapterId, streamState.status, toast]);
 
@@ -864,7 +895,15 @@ const ProjectEditorPage = () => {
                     min={200}
                     max={5000}
                     value={targetLengthValue}
-                    onChange={(event) => setTargetLengthValue(Number(event.target.value))}
+                    onChange={(event) => {
+                      const numeric = Number(event.target.value);
+                      if (!Number.isFinite(numeric)) {
+                        setTargetLengthValue(0);
+                        return;
+                      }
+                      const clamped = Math.min(Math.max(Math.floor(numeric), 0), 5000);
+                      setTargetLengthValue(clamped);
+                    }}
                     className="w-24 rounded-xl border border-slate-700/70 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
                   />
                   <select
