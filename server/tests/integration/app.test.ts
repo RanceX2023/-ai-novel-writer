@@ -16,7 +16,7 @@ describe('Application routes', () => {
       .send({});
 
     expect(response.status).toBe(400);
-    expect(response.body.message).toBe('Request validation failed');
+    expect(response.body.message).toBe('请求参数校验失败');
     expect(response.body.details).toBeDefined();
     expect(response.body.details.issues).toEqual(
       expect.arrayContaining([

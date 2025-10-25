@@ -22,6 +22,13 @@ import {
   updatePlotArc,
   updatePlotPoint,
 } from '../controllers/plotController';
+import {
+  deleteOutlineNode,
+  generateProjectOutline,
+  getProjectOutline,
+  reorderOutlineNodes,
+  upsertOutlineNode,
+} from '../controllers/outlineController';
 import { validateBody } from '../middleware/validate';
 import {
   chapterContinuationSchema,
@@ -38,12 +45,31 @@ import {
   plotSuggestionSchema,
 } from '../validators/plot';
 import { projectCreateSchema, projectStyleSchema } from '../validators/project';
+import {
+  outlineGenerateSchema,
+  outlineNodeUpsertSchema,
+  outlineReorderSchema,
+} from '../validators/outline';
 
 const router = Router();
 
 router.get('/projects', listProjects);
 router.post('/projects', validateBody(projectCreateSchema), createProject);
 router.post('/projects/:projectId/style', validateBody(projectStyleSchema), saveProjectStyle);
+
+router.post(
+  '/projects/:projectId/outline/generate',
+  validateBody(outlineGenerateSchema),
+  generateProjectOutline
+);
+router.get('/projects/:projectId/outline', getProjectOutline);
+router.post('/projects/:projectId/outline', validateBody(outlineNodeUpsertSchema), upsertOutlineNode);
+router.patch(
+  '/projects/:projectId/outline/reorder',
+  validateBody(outlineReorderSchema),
+  reorderOutlineNodes
+);
+router.delete('/projects/:projectId/outline/:nodeId', deleteOutlineNode);
 
 router.get('/projects/:projectId/editor-context', getProjectEditorContext);
 router.get('/projects/:projectId/chapters', listChapters);

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { Types } from 'mongoose';
 import ProjectModel, { Project, StyleProfile as ProjectStyleProfile } from '../models/Project';
+import OutlineNodeModel from '../models/OutlineNode';
 import ApiError from '../utils/ApiError';
 import { ProjectCreateInput, ProjectStyleInput } from '../validators/project';
 
@@ -118,12 +119,27 @@ export const getProjectEditorContext = async (
       throw new ApiError(404, 'Project not found');
     }
 
-    const outline = (project.outlineNodes || []).map((node, index) => ({
-      id: node.key || `${project._id.toString()}-${index}`,
-      title: node.title || `大纲节点 ${index + 1}`,
-      summary: node.summary || '',
-      order: typeof node.order === 'number' ? node.order : index,
-    }));
+    const outlineDocs = await OutlineNodeModel.find({ project: projectId })
+      .sort({ parentId: 1, order: 1, createdAt: 1 })
+      .lean<{ nodeId: string; parentId?: string | null; order?: number; title?: string; summary?: string }[]>();
+
+    let outline = outlineDocs
+      .filter((node) => !node.parentId)
+      .map((node, index) => ({
+        id: node.nodeId,
+        title: node.title || `大纲节点 ${index + 1}`,
+        summary: node.summary || '',
+        order: typeof node.order === 'number' ? node.order : index,
+      }));
+
+    if (!outline.length) {
+      outline = (project.outlineNodes || []).map((node, index) => ({
+        id: node.key || `${project._id.toString()}-${index}`,
+        title: node.title || `大纲节点 ${index + 1}`,
+        summary: node.summary || '',
+        order: typeof node.order === 'number' ? node.order : index,
+      }));
+    }
 
     res.json({
       project: {

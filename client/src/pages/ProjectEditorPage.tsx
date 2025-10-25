@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson } from '../utils/api';
+import OutlinePanel from '../components/outline/OutlinePanel';
 import { useToast } from '../components/ui/ToastProvider';
 
 interface ProjectOutlineNode {
@@ -210,17 +211,7 @@ const ProjectEditorPage = () => {
     });
   }, [memoryQuery.data]);
 
-  const sortedOutline = useMemo(() => {
-    return [...(projectQuery.data?.outline ?? [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [projectQuery.data?.outline]);
 
-  useEffect(() => {
-    if (!sortedOutline.length) {
-      setSelectedOutlineId(null);
-      return;
-    }
-    setSelectedOutlineId((current) => (current && sortedOutline.some((node) => node.id === current) ? current : sortedOutline[0]?.id ?? null));
-  }, [sortedOutline]);
 
   useEffect(() => {
     if (!chaptersQuery.data?.length) {
@@ -711,36 +702,7 @@ const ProjectEditorPage = () => {
 
       <main className="mx-auto mt-6 grid max-w-7xl gap-6 px-4 lg:grid-cols-[280px,1fr,280px]">
         <aside className="space-y-6">
-          <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5 shadow-lg">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-200">章节大纲</h2>
-              {projectQuery.isLoading ? <span className="text-xs text-slate-500">加载中…</span> : null}
-            </div>
-            <div className="mt-4 space-y-2">
-              {sortedOutline.length === 0 && !projectQuery.isLoading ? (
-                <p className="text-xs text-slate-500">尚未配置大纲，请在后端项目中添加 outlineNodes。</p>
-              ) : null}
-              {sortedOutline.map((node) => {
-                const isActive = node.id === selectedOutlineId;
-                return (
-                  <button
-                    key={node.id}
-                    type="button"
-                    onClick={() => setSelectedOutlineId(node.id)}
-                    className={clsx(
-                      'w-full rounded-xl border px-3 py-2 text-left transition',
-                      isActive
-                        ? 'border-brand/50 bg-brand/15 text-slate-100 shadow-glow'
-                        : 'border-transparent bg-slate-900/50 text-slate-300 hover:border-brand/40 hover:bg-slate-900'
-                    )}
-                  >
-                    <p className="text-sm font-medium">{node.title || '未命名节点'}</p>
-                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">{node.summary || '暂无简介'}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
+          <OutlinePanel projectId={projectId} selectedNodeId={selectedOutlineId} onSelectNode={setSelectedOutlineId} />
 
           <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5 shadow-lg">
             <div className="flex items-center justify-between">

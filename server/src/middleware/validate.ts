@@ -13,7 +13,7 @@ export function validateBody<T extends AnyZodObject>(schema: T): RequestHandler 
     const parseResult = schema.safeParse(req.body);
     if (!parseResult.success) {
       const formatted = parseValidationError(parseResult.error);
-      next(new ApiError(400, 'Request validation failed', formatted));
+      next(new ApiError(400, '请求参数校验失败', formatted));
       return;
     }
     req.body = parseResult.data;

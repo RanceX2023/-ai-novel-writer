@@ -20,12 +20,24 @@ export interface PromptMemoryFragment {
   [key: string]: unknown;
 }
 
+export interface PromptOutlineBeat {
+  id?: string;
+  title?: string;
+  summary?: string;
+  order?: number;
+  focus?: string;
+  outcome?: string;
+}
+
 export interface PromptOutlineNode {
   id?: string;
   key?: string;
   title?: string;
   summary?: string;
   order?: number;
+  status?: string;
+  tags?: string[];
+  beats?: PromptOutlineBeat[];
   [key: string]: unknown;
 }
 
@@ -85,6 +97,30 @@ function buildMemorySection(memory: PromptMemoryFragment[] = []): string {
     .join('\n');
 }
 
+function describeBeats(beats?: PromptOutlineBeat[], limit = 4): string | null {
+  if (!beats || beats.length === 0) {
+    return null;
+  }
+  const sorted = [...beats].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return sorted.slice(0, limit).map((beat, index) => {
+    const label = beat.title && beat.title.trim() ? beat.title.trim() : `节拍${index + 1}`;
+    const focus = beat.focus ? `（焦点：${beat.focus}）` : '';
+    const outcome = beat.outcome ? `；结果：${beat.outcome}` : '';
+    return `${index + 1}. ${label}${focus}：${beat.summary ?? ''}${outcome}`;
+  }).join('\n');
+}
+
+function summariseBeatsInline(beats?: PromptOutlineBeat[], limit = 2): string {
+  if (!beats || beats.length === 0) {
+    return '';
+  }
+  const sorted = [...beats].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return sorted.slice(0, limit).map((beat, index) => {
+    const label = beat.title && beat.title.trim() ? beat.title.trim() : `节拍${index + 1}`;
+    return `${label}:${beat.summary ?? ''}`;
+  }).join(' / ');
+}
+
 function buildOutlineSection(node?: PromptOutlineNode | null, additional: PromptOutlineNode[] = []): string {
   if (!node && additional.length === 0) {
     return '未提供任何章节大纲，请根据项目设定合理发挥。';
@@ -94,6 +130,16 @@ function buildOutlineSection(node?: PromptOutlineNode | null, additional: Prompt
   if (node) {
     const header = node.title ? `${node.title}` : '当前大纲节点';
     segments.push(`当前章节节点：${header}${node.summary ? ` —— ${node.summary}` : ''}`);
+    const beatDetails = describeBeats(node.beats, 5);
+    if (beatDetails) {
+      segments.push(`节拍拆解：\n${beatDetails}`);
+    }
+    if (node.tags?.length) {
+      segments.push(`标签：${node.tags.join('、')}`);
+    }
+    if (node.status) {
+      segments.push(`状态：${node.status}`);
+    }
   }
 
   if (additional.length) {
@@ -102,7 +148,9 @@ function buildOutlineSection(node?: PromptOutlineNode | null, additional: Prompt
         + additional
           .map((outline, index) => {
             const label = outline.title || `情节节点${index + 1}`;
-            return `${index + 1}. ${label} —— ${outline.summary ?? '无摘要'}`;
+            const beatsInline = summariseBeatsInline(outline.beats, 2);
+            const beatText = beatsInline ? `（节拍：${beatsInline}）` : '';
+            return `${index + 1}. ${label} —— ${outline.summary ?? '无摘要'}${beatText}`;
           })
           .join('\n')
     );
