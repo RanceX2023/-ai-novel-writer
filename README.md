@@ -1,114 +1,115 @@
-# AI 小说创作平台：Docker 一键启动环境
+# AI 小说写作（Web）
 
-该仓库集成了前端（Vite + React）、后端（Node.js + Express + TypeScript）与 MongoDB 的容器化开发环境。通过一份 `.env` 配置即可完成服务编排，方便团队成员或体验者快速启动完整的本地环境，验证「前端 ⇄ 后端 ⇄ 数据库」的基础流程。
+一个基于 React + TypeScript（前端）与 Node.js + Express + TypeScript（后端）、MongoDB 持久化，并集成 OpenAI API 的中文 AI 小说写作应用。支持：
+- 逐章生成与续写（SSE 流式）
+- 风格模仿/写作风格控制
+- 记忆与一致性维护（世界观/事实/前情摘要/禁忌表，WIP）
 
-## 🚀 快速开始
+## 技术栈
+- 前端：React + TypeScript + Vite + Tailwind CSS + React Query
+- 后端：Node.js + Express + TypeScript
+- 数据库：MongoDB（Mongoose）
+- AI：OpenAI API（流式生成）
 
-1. 复制根目录示例配置：
-   ```bash
-   cp .env.example .env
-   ```
-2. 按需编辑 `.env`，至少确认：
-   - `OPENAI_KEY_SECRET`：任意 32+ 字符的加密密钥；
-   - `OPENAI_API_KEY`（可选）：用于首次启动时自动写入数据库的 OpenAI Key；
-   - 其他端口或 MongoDB 账号按需修改。
-3. 构建并启动全部服务：
-   ```bash
-   docker compose up --build
-   ```
-   或者使用项目脚本（默认后台运行）：
-   ```bash
-   ./scripts/up.sh
-   ```
-4. 浏览器访问：
-   - 前端：<http://localhost:5173>
-   - 后端健康检查：<http://localhost:4000/health>
-
-首次启动会自动：
-- 创建名为 `mongo-data` 的数据卷，保证 MongoDB 数据在停止/重启容器后仍然保留；
-- 在检测到 `OPENAI_API_KEY` 且数据库中不存在同名 alias 时，将密钥加密后写入库中，开箱即可体验生成流程。
-
-## 🧩 服务一览
-
-| 服务      | 默认端口 (宿主机) | 描述 |
-|-----------|-------------------|------|
-| `client`  | `5173`            | Vite 开发服务器，提供前端页面与实时热更新 |
-| `server`  | `4000`            | Express API 服务，连通 Mongo 并负责 AI 相关逻辑 |
-| `mongo`   | `27017`           | MongoDB 6.0，使用持久化数据卷 `mongo-data` |
-
-> Docker Compose 已配置健康检查：`mongo` 通过 `mongosh ping`、`server` 轮询 `/health`，保证依赖顺序正确。`client` 会等待后端健康后再启动。
-
-## ⚙️ 环境变量
-
-### 根目录 `.env`
-
-根目录 `.env.example` 已列出常用变量。复制后可按照下表进行调整：
-
-| 变量名 | 默认值 | 说明 |
-| ------ | ------ | ---- |
-| `CLIENT_PORT` / `SERVER_PORT` | `5173` / `4000` | 对外暴露的端口，可避免与本地已有服务冲突 |
-| `MONGODB_URI` | `mongodb://admin:changeme@mongo:27017/ai_novel_writer?authSource=admin` | 后端连接 MongoDB 使用的 URI，同步写入 `MONGO_URI` 方便复用 |
-| `OPENAI_KEY_SECRET` | `please-change-me` | 用于加密/解密存储在数据库中的 OpenAI Key，务必在生产环境修改 |
-| `OPENAI_API_KEY` | *(空)* | 可选，填入后第一次启动会自动写入数据库（alias 默认 `default`） |
-| `VITE_API_BASE_URL` | `http://localhost:4000` | 前端调用后端的基础地址 |
-| `JWT_SECRET`、`OPENAI_*` | 详见示例 | 后端业务配置，可根据需要调整 |
-
-> 若希望自定义前端/后端的运行参数（如 `VITE_APP_NAME`、`OPENAI_DEFAULT_MODEL`），同样可通过 `.env` 覆盖。
-
-### 可选：源码层调试
-
-- `client/.env.example` 与 `server/.env.example` 仍然保留，方便在不使用 Docker 时直接 `npm run dev`；
-- Docker Compose 已不再依赖这些文件，可按需复制。
-
-## 💾 数据持久化
-
-- MongoDB 数据位于 Docker 卷 `mongo-data` 中，重启容器不会丢失；
-- 如需重置数据库，可执行 `docker compose down -v` 或 `docker volume rm mongo-data`（谨慎操作，数据会被清空）。
-
-## 🛠️ 常用脚本
-
-| 命令 | 作用 |
-| ---- | ---- |
-| `./scripts/build.sh` | 构建所有服务镜像（开发态，使用热更新镜像） |
-| `./scripts/build.sh --prod` | 使用生产阶段镜像（`docker-compose.prod.yml`）进行构建 |
-| `./scripts/up.sh` | 以后台模式启动所有服务（默认开发态） |
-| `./scripts/up.sh --fg` | 以前台模式输出日志，方便调试 |
-| `./scripts/up.sh --prod` | 结合生产覆盖配置启动，前端将以 Nginx 静态服务的形式运行 |
-
-停止服务：
-```bash
-docker compose down
+## 仓库结构（规划）
 ```
-如需保留数据库数据，可省略 `-v` 参数。
-
-## 📦 生产模式（可选）
-
-`docker-compose.prod.yml` 通过覆盖实现：
-- 使用 Dockerfile 中的 `production` 阶段镜像（后端运行已编译的 `dist`，前端由 Nginx 提供静态文件）；
-- 移除源码挂载卷，容器重启即完成热更新；
-- `client` 暴露到宿主机的依然是 `5173` 端口（映射到容器内 Nginx 的 80 端口）。
-
-启动示例：
-```bash
-./scripts/up.sh --prod --fg
+ai-novel-writer/
+  client/                 # 前端应用（Vite）
+  server/                 # 后端服务（Express + TS）
+  README.md
+  .env.example            # 环境变量示例
 ```
 
-## ❗ 常见问题与排查
+## 快速开始（开发模式）
+前置要求：Node.js >= 18，npm/pnpm，MongoDB 实例，OpenAI API Key。
 
-| 现象 | 排查方向 |
-| ---- | -------- |
-| `OPENAI_KEY_SECRET must be configured` | `.env` 中未设置 `OPENAI_KEY_SECRET`；复制 `.env.example` 后重新启动 |
-| `OPENAI API keys are not configured` | 未在数据库中写入 Key：可设置 `OPENAI_API_KEY` 后重新 `docker compose up`，或通过后端 API 管理界面添加 |
-| `mongo` 容器反复重启 | 检查 `.env` 中的 Mongo 账户/密码是否匹配，或确认宿主机未占用 `MONGO_PORT` |
-| 前端无法联通后端 | 确认 `.env` 中 `VITE_API_BASE_URL` 指向正确，后端 `/health` 状态为 `ok` |
-
-如需进一步调试，可查看各容器日志：
-```bash
-docker compose logs -f server
-# 或
-./scripts/up.sh --fg
+1. 克隆仓库并安装依赖
+```
+# 在根目录（若采用单仓/双包结构，可在 client/ 与 server/ 各自安装）
+npm install
 ```
 
----
+2. 配置环境变量（复制 .env.example 为 .env，并填入以下字段）
+```
+# server 侧必填
+OPENAI_API_KEY=sk-...
+MONGODB_URI=mongodb://localhost:27017/ai-novel-writer
+PORT=3001
+# 可选
+OPENAI_MODEL=gpt-4o-mini
+```
 
-现在，运行 `docker compose up` 就能体验完整的 AI 小说创作链路，尽情探索吧！
+3. 启动服务（示例脚本，具体以 package.json 为准）
+```
+# 启动后端（监听 http://localhost:3001）
+npm run dev:server
+
+# 启动前端（监听 http://localhost:5173）
+npm run dev:client
+```
+
+4. 健康检查
+- 后端：GET http://localhost:3001/health → { ok: true }
+- 前端：打开 http://localhost:5173
+
+> 注：若脚本名与端口与实际不一致，请以仓库内 package.json 与 .env 为准；后续任务会统一。
+
+## Docker 一键启动（可选）
+当提供 docker-compose.yml 后，可使用：
+```
+docker compose up -d
+```
+默认将启动 MongoDB、server、client 三个服务，并通过健康检查确保可用。
+
+## 环境变量说明（后端）
+- OPENAI_API_KEY：OpenAI 密钥，必填
+- OPENAI_MODEL：默认 gpt-4o-mini，可按需调整
+- MONGODB_URI：MongoDB 连接串，必填
+- PORT：后端服务端口，默认 3001
+
+## 核心能力与接口（MVP）
+- 项目与风格配置
+  - POST /api/projects：创建项目
+  - GET /api/projects：项目列表
+  - GET /api/projects/:id：项目详情
+  - POST /api/projects/:id/style：保存风格配置
+
+- 章节生成与续写（SSE 流式）
+  - POST /api/projects/:id/chapters/generate：基于大纲/记忆/风格生成章节（返回 jobId）
+  - POST /api/projects/:id/chapters/:chapterId/continue：续写既有章节（返回 jobId）
+  - GET  /api/stream/:jobId：SSE 流推送事件：start、delta、progress、error、done
+
+- 记忆与一致性（WIP）
+  - GET /api/projects/:id/memory：读取项目记忆
+  - POST /api/projects/:id/memory/sync：从章节抽取事实并合并
+
+### SSE 客户端示例（前端）
+```ts
+// 获得 jobId 后，建立 SSE 连接
+const es = new EventSource(`/api/stream/${jobId}`);
+es.addEventListener('start', () => {/* ... */});
+es.addEventListener('delta', (e) => {
+  const chunk = e.data; // 追加显示
+});
+es.addEventListener('error', (e) => {/* 提示错误 */});
+es.addEventListener('done', () => { es.close(); });
+```
+
+## 开发约定
+- 所有接口与 UI 默认中文文案
+- 生成长度、风格强度等参数需做边界校验
+- 重要流程（生成/续写）使用 GenJob 记录状态、计费与耗时（WIP）
+
+## 路线图（Roadmap）
+- [ ] 初始化 server 与 client 脚手架与脚本统一
+- [ ] MongoDB 模型：Project/Character/Memory/Chapter/StyleProfile/GenJob
+- [ ] OpenAI 服务封装与流式工具
+- [ ] 章节生成/续写 API + SSE 流
+- [ ] 前端编辑器：流式预览、保存、续写
+- [ ] 记忆抽取与同步管线
+- [ ] 大纲生成与管理
+- [ ] 人物卡与风格配置 UI
+- [ ] Docker Compose 一键启动
+
+## 许可
+本项目暂未指定开源协议（可根据需要添加）。
