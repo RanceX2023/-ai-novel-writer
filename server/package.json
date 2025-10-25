@@ -2,23 +2,37 @@
   "name": "ai-novel-server",
   "version": "1.0.0",
   "description": "Backend service for AI-powered novel generation",
-  "main": "src/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
     "test": "jest"
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "mongoose": "^7.6.3",
     "morgan": "^1.10.0",
     "nanoid": "^4.0.2",
-    "openai": "^4.56.0"
+    "openai": "^4.56.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.12",
+    "@types/morgan": "^1.9.9",
+    "@types/node": "^20.11.30",
+    "@types/supertest": "^2.0.16",
     "jest": "^29.7.0",
     "mongodb-memory-server": "^10.1.4",
-    "supertest": "^6.3.4"
+    "supertest": "^6.3.4",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
   }
 }

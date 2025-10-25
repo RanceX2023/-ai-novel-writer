@@ -1,32 +1,44 @@
-const OpenAIRateLimit = require('../../models/OpenAIRateLimit');
-const ApiError = require('../../utils/ApiError');
+import { Model, Types } from 'mongoose';
+import OpenAIRateLimitModel, {
+  OpenAIRateLimit,
+  OpenAIRateLimitDocument,
+} from '../../models/OpenAIRateLimit';
+import ApiError from '../../utils/ApiError';
+
+export interface RateLimiterOptions {
+  model?: Model<OpenAIRateLimit>;
+  limitPerWindow?: number;
+  windowMs?: number;
+}
 
 class OpenAIRateLimiter {
-  constructor({
-    model = OpenAIRateLimit,
-    limitPerWindow,
-    windowMs,
-  } = {}) {
+  private model: Model<OpenAIRateLimit>;
+
+  private limit: number;
+
+  private windowMs: number;
+
+  constructor({ model = OpenAIRateLimitModel, limitPerWindow, windowMs }: RateLimiterOptions = {}) {
     this.model = model;
     this.limit = Number.isInteger(limitPerWindow)
-      ? limitPerWindow
-      : parseInt(process.env.OPENAI_RATE_LIMIT_PER_MINUTE, 10) || 60;
+      ? Number(limitPerWindow)
+      : parseInt(process.env.OPENAI_RATE_LIMIT_PER_MINUTE ?? '', 10) || 60;
     this.windowMs = Number.isInteger(windowMs)
-      ? windowMs
-      : parseInt(process.env.OPENAI_RATE_LIMIT_WINDOW_MS, 10) || 60_000;
+      ? Number(windowMs)
+      : parseInt(process.env.OPENAI_RATE_LIMIT_WINDOW_MS ?? '', 10) || 60_000;
   }
 
-  #currentWindowStart(now = Date.now()) {
+  private currentWindowStart(now: number = Date.now()): Date {
     const windowIndex = Math.floor(now / this.windowMs);
     return new Date(windowIndex * this.windowMs);
   }
 
-  async consume(apiKeyId, weight = 1) {
+  async consume(apiKeyId: Types.ObjectId | string, weight = 1): Promise<OpenAIRateLimitDocument> {
     if (!apiKeyId) {
       throw new ApiError(500, 'Rate limiter requires a valid API key reference');
     }
 
-    const windowStart = this.#currentWindowStart();
+    const windowStart = this.currentWindowStart();
 
     const record = await this.model
       .findOneAndUpdate(
@@ -53,7 +65,7 @@ class OpenAIRateLimiter {
     return record;
   }
 
-  async reset(apiKeyId) {
+  async reset(apiKeyId: Types.ObjectId | string | undefined): Promise<void> {
     if (!apiKeyId) {
       return;
     }
@@ -61,4 +73,4 @@ class OpenAIRateLimiter {
   }
 }
 
-module.exports = OpenAIRateLimiter;
+export default OpenAIRateLimiter;

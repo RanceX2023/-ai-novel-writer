@@ -1,9 +1,24 @@
-const crypto = require('crypto');
-const OpenAIApiKey = require('../../models/OpenAIApiKey');
-const ApiError = require('../../utils/ApiError');
+import crypto from 'crypto';
+import { Model } from 'mongoose';
+import OpenAIApiKeyModel, {
+  OpenAIApiKey,
+  OpenAIApiKeyDocument,
+} from '../../models/OpenAIApiKey';
+import ApiError from '../../utils/ApiError';
+
+export interface KeyManagerOptions {
+  model?: Model<OpenAIApiKey>;
+  encryptionSecret?: string;
+}
 
 class OpenAIKeyManager {
-  constructor({ model = OpenAIApiKey, encryptionSecret } = {}) {
+  private model: Model<OpenAIApiKey>;
+
+  private keyBuffer: Buffer;
+
+  private algorithm: string;
+
+  constructor({ model = OpenAIApiKeyModel, encryptionSecret }: KeyManagerOptions = {}) {
     const secret = encryptionSecret || process.env.OPENAI_KEY_SECRET;
     if (!secret) {
       throw new Error('OPENAI_KEY_SECRET must be configured to manage API keys');
@@ -14,7 +29,7 @@ class OpenAIKeyManager {
     this.algorithm = 'aes-256-gcm';
   }
 
-  encrypt(rawKey) {
+  encrypt(rawKey: string): string {
     if (typeof rawKey !== 'string' || rawKey.length === 0) {
       throw new Error('An API key value is required for encryption');
     }
@@ -25,7 +40,7 @@ class OpenAIKeyManager {
     return `${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted.toString('base64')}`;
   }
 
-  decrypt(payload) {
+  decrypt(payload: string): string {
     if (typeof payload !== 'string' || payload.split(':').length !== 3) {
       throw new Error('Invalid encrypted payload');
     }
@@ -41,7 +56,7 @@ class OpenAIKeyManager {
     return decrypted.toString('utf8');
   }
 
-  async addKey({ alias, apiKey, metadata }) {
+  async addKey({ alias, apiKey, metadata }: { alias: string; apiKey: string; metadata?: Record<string, unknown> }): Promise<OpenAIApiKeyDocument> {
     if (!alias || !apiKey) {
       throw new Error('Both alias and apiKey are required to add a key');
     }
@@ -54,7 +69,7 @@ class OpenAIKeyManager {
     });
   }
 
-  async getKeyForUse() {
+  async getKeyForUse(): Promise<{ keyDoc: OpenAIApiKeyDocument; apiKey: string }> {
     const keyDoc = await this.model
       .findOne({ isActive: true })
       .sort({ lastUsedAt: 1, createdAt: 1 })
@@ -68,12 +83,15 @@ class OpenAIKeyManager {
     return { keyDoc, apiKey };
   }
 
-  async markUsage(keyDoc, { tokens } = {}) {
+  async markUsage(keyDoc: OpenAIApiKeyDocument | null | undefined, { tokens }: { tokens?: number } = {}): Promise<void> {
     if (!keyDoc) {
       return;
     }
 
-    const updates = {
+    const updates: {
+      $set: { lastUsedAt: Date };
+      $inc: { usageCount: number; totalTokens?: number };
+    } = {
       $set: { lastUsedAt: new Date() },
       $inc: { usageCount: 1 },
     };
@@ -86,4 +104,4 @@ class OpenAIKeyManager {
   }
 }
 
-module.exports = OpenAIKeyManager;
+export default OpenAIKeyManager;
