@@ -6,12 +6,11 @@ export interface StyleProfileAttributes {
   tone?: string;
   pacing?: string;
   pov?: string;
-  mood?: string;
-  genre?: string;
-  voice?: string;
-  instructions?: string;
+  diction?: string;
+  authors?: string[];
+  styleStrength?: number;
   language?: string;
-  strength?: number;
+  notes?: string;
   metadata?: Record<string, unknown> | null;
   createdAt?: Date;
   updatedAt?: Date;
@@ -26,12 +25,11 @@ const StyleProfileSchema = new Schema<StyleProfileAttributes>(
     tone: { type: String },
     pacing: { type: String },
     pov: { type: String },
-    mood: { type: String },
-    genre: { type: String },
-    voice: { type: String },
-    instructions: { type: String },
+    diction: { type: String },
+    authors: [{ type: String }],
+    styleStrength: { type: Number, min: 0, max: 1 },
     language: { type: String },
-    strength: { type: Number, min: 0, max: 1 },
+    notes: { type: String },
     metadata: { type: Schema.Types.Mixed },
   },
   { timestamps: true }

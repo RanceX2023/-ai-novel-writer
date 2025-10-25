@@ -1,13 +1,17 @@
 export interface PromptStyleProfile {
-  voice?: string;
+  name?: string;
   tone?: string;
-  mood?: string;
   pacing?: string;
   pov?: string;
-  genre?: string;
+  diction?: string;
+  authors?: string[];
   language?: string;
   instructions?: string;
-  strength?: number;
+  notes?: string;
+  styleStrength?: number;
+  voice?: string;
+  mood?: string;
+  genre?: string;
   [key: string]: unknown;
 }
 
@@ -18,6 +22,18 @@ export interface PromptMemoryFragment {
   tags?: string[];
   strength?: string;
   [key: string]: unknown;
+}
+
+export interface PromptCharacter {
+  id?: string;
+  name: string;
+  role?: string;
+  background?: string;
+  goals?: string;
+  conflicts?: string;
+  quirks?: string;
+  voice?: string;
+  notes?: string;
 }
 
 export interface PromptOutlineBeat {
@@ -48,6 +64,7 @@ export interface ChapterPromptOptions {
   outlineNode?: PromptOutlineNode | null;
   additionalOutline?: PromptOutlineNode[];
   memoryFragments?: PromptMemoryFragment[];
+  characters?: PromptCharacter[];
   styleProfile?: PromptStyleProfile;
   continuation?: boolean;
   previousSummary?: string;
@@ -60,27 +77,47 @@ export interface ChapterPromptOptions {
 }
 
 function buildStyleDirective(style: PromptStyleProfile = {}): string {
-  const parts: string[] = [];
-  if (style.voice) parts.push(`叙事声音：${style.voice}`);
-  if (style.tone) parts.push(`语气基调：${style.tone}`);
-  if (style.mood) parts.push(`情绪氛围：${style.mood}`);
-  if (style.pacing) parts.push(`节奏控制：${style.pacing}`);
-  if (style.genre) parts.push(`类型标签：${style.genre}`);
-  if (style.pov) parts.push(`叙事视角：${style.pov}`);
-  if (typeof style.strength === 'number') {
-    parts.push(`风格执行强度：${Math.round(style.strength * 100)}%`);
-  }
-  if (style.instructions) parts.push(`额外指令：${style.instructions}`);
-
   const languageHint = style.language
-    ? `输出语言必须为${style.language}，除非特别指定。`
+    ? `输出语言必须为${style.language}，除非特别说明。`
     : '输出语言默认为中文。';
 
-  if (!parts.length) {
-    return languageHint;
+  const styleName = style.name ? `风格配置：「${style.name}」。` : '';
+
+  const attributeParts: string[] = [];
+  if (style.tone) attributeParts.push(`语气基调：${style.tone}`);
+  if (style.pacing) attributeParts.push(`节奏控制：${style.pacing}`);
+  if (style.pov) attributeParts.push(`叙事视角：${style.pov}`);
+  if (style.diction) attributeParts.push(`用词风格：${style.diction}`);
+  if (style.authors?.length) attributeParts.push(`参考作者：${style.authors.join('、')}`);
+  if (style.voice) attributeParts.push(`叙事声音：${style.voice}`);
+  if (style.mood) attributeParts.push(`情绪氛围：${style.mood}`);
+  if (style.genre) attributeParts.push(`类型标签：${style.genre}`);
+
+  const attributeLine = attributeParts.length ? `风格参数：${attributeParts.join('；')}。` : '';
+
+  const noteParts: string[] = [];
+  if (style.notes) noteParts.push(`写作备注：${style.notes}`);
+  if (style.instructions) noteParts.push(`额外指令：${style.instructions}`);
+  const notesLine = noteParts.length ? `${noteParts.join('；')}。` : '';
+
+  let strengthLine = '';
+  if (typeof style.styleStrength === 'number') {
+    const percent = Math.round(style.styleStrength * 100);
+    if (style.styleStrength >= 0.75) {
+      strengthLine = `请严格遵守上述风格指引（执行强度 ${percent}%）。`;
+    } else if (style.styleStrength >= 0.5) {
+      strengthLine = `请明显体现上述风格，同时允许适度灵活调整（执行强度 ${percent}%）。`;
+    } else {
+      strengthLine = `上述风格参数仅作背景参考，保持自然流畅（执行强度 ${percent}%）。`;
+    }
   }
 
-  return `${languageHint} 风格参数：${parts.join('；')}。`;
+  const segments = [languageHint, styleName, attributeLine, notesLine, strengthLine]
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .join(' ');
+
+  return segments || languageHint;
 }
 
 function buildMemorySection(memory: PromptMemoryFragment[] = []): string {
@@ -93,6 +130,39 @@ function buildMemorySection(memory: PromptMemoryFragment[] = []): string {
       const type = fragment.type ? `【${fragment.type}】` : '';
       const tags = fragment.tags?.length ? ` 标签：${fragment.tags.join('、')}` : '';
       return `- ${type}${label}：${fragment.content}${tags}`;
+    })
+    .join('\n');
+}
+
+function buildCharacterSection(characters: PromptCharacter[] = []): string {
+  if (!characters.length) {
+    return '未指定重点人物，请根据既有设定保持角色一致。';
+  }
+
+  const safeString = (value?: string) => value?.replace(/\s+/g, ' ').trim();
+
+  return characters
+    .slice(0, 8)
+    .map((character, index) => {
+      const summaryParts: string[] = [];
+      const role = safeString(character.role);
+      const background = safeString(character.background);
+      const goals = safeString(character.goals);
+      const conflicts = safeString(character.conflicts);
+      const quirks = safeString(character.quirks);
+      const voice = safeString(character.voice);
+      const notes = safeString(character.notes);
+
+      if (role) summaryParts.push(`定位：${role}`);
+      if (background) summaryParts.push(`背景：${background}`);
+      if (goals) summaryParts.push(`目标：${goals}`);
+      if (conflicts) summaryParts.push(`冲突：${conflicts}`);
+      if (quirks) summaryParts.push(`特质：${quirks}`);
+      if (voice) summaryParts.push(`语气：${voice}`);
+      if (notes) summaryParts.push(`备注：${notes}`);
+
+      const summary = summaryParts.join('；') || '（保持原有人设）';
+      return `${index + 1}. ${character.name} —— ${summary}`;
     })
     .join('\n');
 }
@@ -174,6 +244,7 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
     outlineNode,
     additionalOutline = [],
     memoryFragments = [],
+    characters = [],
     styleProfile,
     continuation,
     previousSummary,
@@ -183,6 +254,7 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
 
   const outlineSection = buildOutlineSection(outlineNode, additionalOutline);
   const memorySection = buildMemorySection(memoryFragments);
+  const characterSection = buildCharacterSection(characters);
   const styleSection = buildStyleDirective(styleProfile);
 
   const continuationLine = continuation
@@ -202,6 +274,8 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
     lengthHint,
     '章节大纲：',
     outlineSection,
+    '重点角色设定：',
+    characterSection,
     '记忆库重点：',
     memorySection,
     styleSection,

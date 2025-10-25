@@ -6,13 +6,14 @@ export const projectCreateSchema = z.object({
 });
 
 export const projectStyleSchema = z.object({
-  genre: z.string().trim().min(1).max(120),
   tone: z.string().trim().min(1).max(120),
   pacing: z.string().trim().min(1).max(120),
   pov: z.string().trim().min(1).max(120),
-  voice: z.string().trim().min(1).max(120).optional(),
+  diction: z.string().trim().min(1).max(240),
+  authors: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
+  styleStrength: z.number().min(0).max(1).optional(),
   language: z.string().trim().min(2).max(40).optional(),
-  instructions: z.string().trim().min(1).max(500).optional(),
+  notes: z.string().trim().min(1).max(600).optional(),
 });
 
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;

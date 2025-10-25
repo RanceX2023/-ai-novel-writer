@@ -9,13 +9,14 @@ const targetLengthSchema = z.object({
 
 const styleOverrideSchema = z.object({
   tone: z.string().trim().min(1).max(120).optional(),
-  voice: z.string().trim().min(1).max(120).optional(),
-  mood: z.string().trim().min(1).max(120).optional(),
   pacing: z.string().trim().min(1).max(120).optional(),
   pov: z.string().trim().min(1).max(120).optional(),
-  genre: z.string().trim().min(1).max(120).optional(),
+  diction: z.string().trim().min(1).max(240).optional(),
+  authors: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
   language: z.string().trim().min(2).max(40).optional(),
+  notes: z.string().trim().min(1).max(600).optional(),
   instructions: z.string().trim().min(1).max(1200).optional(),
+  styleStrength: z.number().min(0).max(1).optional(),
   strength: z.number().min(0).max(1).optional(),
 });
 
@@ -38,6 +39,10 @@ export const chapterGenerationSchema = z.object({
     .max(32)
     .optional(),
   memoryFragments: z.array(memoryFragmentSchema).max(32).optional(),
+  characterIds: z
+    .array(z.string().regex(mongoIdRegex, 'characterIds must contain valid Mongo ObjectIds'))
+    .max(12)
+    .optional(),
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema.optional(),
   instructions: z.string().trim().min(1).max(2000).optional(),
@@ -55,6 +60,10 @@ export const chapterContinuationSchema = z.object({
     .max(32)
     .optional(),
   memoryFragments: z.array(memoryFragmentSchema).max(32).optional(),
+  characterIds: z
+    .array(z.string().regex(mongoIdRegex, 'characterIds must contain valid Mongo ObjectIds'))
+    .max(12)
+    .optional(),
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema,
   instructions: z.string().trim().min(1).max(2000).optional(),
