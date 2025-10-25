@@ -7,6 +7,7 @@ import GenerationService from './services/generationService';
 import OpenAIService from './services/openai';
 import MemoryService from './services/memoryService';
 import PlotService from './services/plotService';
+import OutlineService from './services/outlineService';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 
 const app = express();
@@ -14,10 +15,12 @@ const openAIService = new OpenAIService();
 const memoryService = new MemoryService({ openAIService });
 const generationService = new GenerationService({ openAIService, memoryService });
 const plotService = new PlotService(openAIService);
+const outlineService = new OutlineService({ openAIService, memoryService });
 
 app.set('generationService', generationService);
 app.set('memoryService', memoryService);
 app.set('plotService', plotService);
+app.set('outlineService', outlineService);
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));

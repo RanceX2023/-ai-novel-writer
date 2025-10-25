@@ -3,7 +3,8 @@ import { Types } from 'mongoose';
 import ApiError from '../utils/ApiError';
 import ChapterModel, { Chapter } from '../models/Chapter';
 import GenJobModel, { GenerationJobDocument } from '../models/GenJob';
-import ProjectModel, { ProjectDocument, OutlineNode, StyleProfile as ProjectStyleProfile } from '../models/Project';
+import ProjectModel, { ProjectDocument, StyleProfile as ProjectStyleProfile } from '../models/Project';
+import OutlineNodeModel, { OutlineNode as StoredOutlineNode } from '../models/OutlineNode';
 import MemoryModel from '../models/Memory';
 import StyleProfileModel, { StyleProfileAttributes, StyleProfileDocument } from '../models/StyleProfile';
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
@@ -105,9 +106,10 @@ class GenerationService {
       throw new ApiError(404, 'Project not found');
     }
 
-    const outlineNode = this.findOutlineNode(project, payload.outlineNodeId);
+    const outlineNodes = await this.loadOutlineNodes(project);
+    const outlineNode = this.findOutlineNode(outlineNodes, payload.outlineNodeId);
     if (!outlineNode) {
-      throw new ApiError(404, 'Outline node not found for project');
+      throw new ApiError(404, '未找到项目对应的大纲节点');
     }
 
     const styleProfile = await this.resolveStyleProfile(project, payload.styleProfileId, payload.styleOverride);
@@ -118,7 +120,7 @@ class GenerationService {
       type: 'chapter_generation',
       status: 'queued',
       metadata: {
-        outlineNodeId: payload.outlineNodeId,
+        outlineNodeId: outlineNode.nodeId,
         styleProfileId: payload.styleProfileId,
         memoryIds: payload.memoryIds,
         targetLength: payload.targetLength,
@@ -127,7 +129,7 @@ class GenerationService {
       },
     });
 
-    const additionalOutline = (project.outlineNodes || []).filter((node) => node !== outlineNode);
+    const additionalOutline = this.buildAdditionalOutline(outlineNodes, outlineNode);
 
     this.executeJob(job._id.toString(), async ({ job, signal }) => {
       const chapterTitle = outlineNode.title || (await this.generateChapterTitle(project._id));
@@ -136,7 +138,7 @@ class GenerationService {
         synopsis: project.synopsis,
         chapterTitle,
         outlineNode: this.normaliseOutlineNode(outlineNode),
-        additionalOutline: additionalOutline.map((node) => this.normaliseOutlineNode(node)),
+        additionalOutline,
         memoryFragments,
         styleProfile,
         continuation: false,
@@ -198,8 +200,9 @@ class GenerationService {
       throw new ApiError(404, 'Chapter not found for project');
     }
 
+    const outlineNodes = await this.loadOutlineNodes(project);
     const outlineNode = payload.outlineNodeId
-      ? this.findOutlineNode(project, payload.outlineNodeId)
+      ? this.findOutlineNode(outlineNodes, payload.outlineNodeId)
       : null;
 
     const styleProfile = await this.resolveStyleProfile(project, payload.styleProfileId, payload.styleOverride);
@@ -211,7 +214,7 @@ class GenerationService {
       type: 'chapter_continuation',
       status: 'queued',
       metadata: {
-        outlineNodeId: payload.outlineNodeId,
+        outlineNodeId: outlineNode?.nodeId ?? null,
         styleProfileId: payload.styleProfileId,
         memoryIds: payload.memoryIds,
         targetLength: payload.targetLength,
@@ -221,8 +224,8 @@ class GenerationService {
     });
 
     const additionalOutline = outlineNode
-      ? (project.outlineNodes || []).filter((node) => node !== outlineNode)
-      : project.outlineNodes || [];
+      ? this.buildAdditionalOutline(outlineNodes, outlineNode)
+      : this.buildRootOutlineContext(outlineNodes);
 
     this.executeJob(job._id.toString(), async ({ job, signal }) => {
       const promptOptions: StreamChapterOptions = {
@@ -230,7 +233,7 @@ class GenerationService {
         synopsis: project.synopsis,
         chapterTitle: chapter.title,
         outlineNode: outlineNode ? this.normaliseOutlineNode(outlineNode) : undefined,
-        additionalOutline: additionalOutline.map((node) => this.normaliseOutlineNode(node)),
+        additionalOutline,
         memoryFragments,
         styleProfile,
         continuation: true,
@@ -487,13 +490,23 @@ class GenerationService {
     return Math.min(99, Math.round((tokensGenerated / targetTokens) * 100));
   }
 
-  private normaliseOutlineNode(node: OutlineNode): PromptOutlineNode {
+  private normaliseOutlineNode(node: StoredOutlineNode): PromptOutlineNode {
     return {
-      id: node.key,
-      key: node.key,
+      id: node.nodeId,
+      key: node.nodeId,
       title: node.title,
       summary: node.summary,
-      order: node.order,
+      order: node.order ?? 0,
+      status: node.status ?? undefined,
+      tags: Array.isArray(node.tags) ? node.tags : undefined,
+      beats: (node.beats ?? []).map((beat) => ({
+        id: beat.beatId,
+        title: beat.title,
+        summary: beat.summary,
+        order: beat.order ?? 0,
+        focus: beat.focus,
+        outcome: beat.outcome,
+      })),
     };
   }
 
@@ -502,14 +515,96 @@ class GenerationService {
     return `章节 ${count + 1}`;
   }
 
-  private findOutlineNode(project: ProjectDocument, outlineNodeId: string): OutlineNode | null {
-    if (!Array.isArray(project.outlineNodes)) {
+  private async loadOutlineNodes(project: ProjectDocument): Promise<StoredOutlineNode[]> {
+    const docs = await OutlineNodeModel.find({ project: project._id })
+      .sort({ order: 1, createdAt: 1 })
+      .lean<StoredOutlineNode[]>();
+
+    if (docs.length > 0) {
+      return docs;
+    }
+
+    if (!Array.isArray(project.outlineNodes) || project.outlineNodes.length === 0) {
+      return [];
+    }
+
+    return project.outlineNodes.map((legacyNode, index) => {
+      const node = legacyNode as unknown as {
+        key?: string;
+        title?: string;
+        summary?: string;
+        order?: number;
+        metadata?: Record<string, unknown> | null;
+      };
+      return {
+        project: project._id,
+        nodeId: node.key || `${project._id.toString()}-${index}`,
+        parentId: null,
+        order: node.order ?? index,
+        title: node.title ?? `大纲节点 ${index + 1}`,
+        summary: node.summary ?? '',
+        beats: [],
+        status: 'legacy',
+        tags: [],
+        meta: node.metadata ?? null,
+        createdAt: undefined,
+        updatedAt: undefined,
+      } as unknown as StoredOutlineNode;
+    });
+  }
+
+  private findOutlineNode(nodes: StoredOutlineNode[], outlineNodeId?: string | null): StoredOutlineNode | null {
+    if (!outlineNodeId) {
       return null;
     }
-    return (
-      project.outlineNodes.find((node) => node.key === outlineNodeId || (node as unknown as { id?: string }).id === outlineNodeId)
-      || null
-    );
+    return nodes.find((node) => node.nodeId === outlineNodeId) ?? null;
+  }
+
+  private buildAdditionalOutline(nodes: StoredOutlineNode[], current: StoredOutlineNode): PromptOutlineNode[] {
+    const related: PromptOutlineNode[] = [];
+
+    if (current.parentId) {
+      const parent = nodes.find((node) => node.nodeId === current.parentId);
+      if (parent) {
+        related.push(this.normaliseOutlineNode(parent));
+      }
+    }
+
+    const siblings = nodes
+      .filter((node) => node.parentId === (current.parentId ?? null) && node.nodeId !== current.nodeId)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    siblings.forEach((node) => related.push(this.normaliseOutlineNode(node)));
+
+    const children = nodes
+      .filter((node) => node.parentId === current.nodeId)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    children.forEach((node) => related.push(this.normaliseOutlineNode(node)));
+
+    return this.dedupeOutline(related).slice(0, 16);
+  }
+
+  private buildRootOutlineContext(nodes: StoredOutlineNode[]): PromptOutlineNode[] {
+    const roots = nodes
+      .filter((node) => !node.parentId)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const context = roots.map((node) => this.normaliseOutlineNode(node));
+    return this.dedupeOutline(context).slice(0, 16);
+  }
+
+  private dedupeOutline(nodes: PromptOutlineNode[]): PromptOutlineNode[] {
+    const seen = new Set<string>();
+    const result: PromptOutlineNode[] = [];
+    nodes.forEach((node) => {
+      const identifier = (node.id ?? node.key ?? node.title ?? '').toString();
+      if (identifier && seen.has(identifier)) {
+        return;
+      }
+      if (identifier) {
+        seen.add(identifier);
+      }
+      result.push(node);
+    });
+    return result;
   }
 
   private async resolveMemoryFragments(
@@ -676,7 +771,7 @@ class GenerationService {
     projectId: Types.ObjectId;
     jobId: Types.ObjectId;
     chapterTitle: string;
-    outlineNode: OutlineNode;
+    outlineNode: StoredOutlineNode;
     context: {
       memoryFragments: PromptMemoryFragment[];
       styleProfile?: PromptStyleProfile;
@@ -695,7 +790,7 @@ class GenerationService {
           version: 1,
           content,
           metadata: {
-            outlineNodeId: outlineNode.key,
+            outlineNodeId: outlineNode.nodeId,
             memory: context.memoryFragments,
             styleProfile: context.styleProfile,
           },
