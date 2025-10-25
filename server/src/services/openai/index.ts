@@ -16,6 +16,7 @@ export interface UsageRecord {
 export interface StreamChapterOptions extends ChapterPromptOptions {
   signal?: AbortSignal;
   onDelta?: (delta: string) => void;
+  onRequestId?: (requestId: string) => void;
 }
 
 export interface StreamChapterResult {
@@ -210,6 +211,9 @@ class OpenAIService {
       for await (const chunk of stream) {
         if (!requestId && chunk.id) {
           requestId = chunk.id;
+          if (requestId) {
+            options.onRequestId?.(requestId);
+          }
         }
 
         const delta = chunk.choices?.[0]?.delta?.content;

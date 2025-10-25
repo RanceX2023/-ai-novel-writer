@@ -57,6 +57,11 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     message: isApiError ? err.message : 'Internal Server Error',
   };
 
+  const requestId = (req as Request & { id?: string }).id;
+  if (requestId) {
+    payload.requestId = requestId;
+  }
+
   if (isApiError && err.details !== undefined) {
     payload.details = err.details;
   }
@@ -69,7 +74,6 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   }
 
   const requestLogger = getRequestLogger(req);
-  const requestId = (req as Request & { id?: string }).id;
   if (err instanceof Error) {
     requestLogger.error({ err, requestId, code, statusCode }, err.message);
   } else {

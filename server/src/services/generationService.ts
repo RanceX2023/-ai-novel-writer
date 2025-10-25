@@ -48,6 +48,10 @@ class GenerationService {
 
   private cancelledJobReasons: Map<string, string>;
 
+  private disconnectTimers: Map<string, NodeJS.Timeout>;
+
+  private disconnectGraceMs: number;
+
   private costPer1KTokens: number;
 
   private logger: Logger;
@@ -66,6 +70,8 @@ class GenerationService {
     this.streamSubscriptions = new Map();
     this.jobControllers = new Map();
     this.cancelledJobReasons = new Map();
+    this.disconnectTimers = new Map();
+    this.disconnectGraceMs = Math.max(0, Number(process.env.GENERATION_STREAM_DISCONNECT_GRACE_MS ?? 10_000));
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
     this.logger = logger ?? baseLogger.child({ module: 'generation-service' });
   }
@@ -82,22 +88,61 @@ class GenerationService {
     }, HEARTBEAT_INTERVAL_MS);
 
     const subscription: SseSubscription = { res, heartbeat };
-    this.streamSubscriptions.get(jobId)!.add(subscription);
+    const subscribers = this.streamSubscriptions.get(jobId)!;
+    subscribers.add(subscription);
+    this.clearDisconnectTimer(jobId);
 
-    res.on('close', () => {
+    const handleClose = () => {
       clearInterval(heartbeat);
-      const subscribers = this.streamSubscriptions.get(jobId);
-      subscribers?.delete(subscription);
+      const currentSubscribers = this.streamSubscriptions.get(jobId);
+      currentSubscribers?.delete(subscription);
 
-      const hasActiveJob = this.jobControllers.has(jobId);
-      if (!subscribers || subscribers.size === 0) {
-        this.streamSubscriptions.delete(jobId);
-        if (hasActiveJob) {
-          this.logger.warn({ jobId }, 'client disconnected from generation stream');
-          this.cancelJob(jobId, 'Client disconnected from stream');
-        }
+      if (!currentSubscribers || currentSubscribers.size === 0) {
+        this.scheduleDisconnect(jobId);
       }
-    });
+    };
+
+    res.on('close', handleClose);
+    res.on('error', handleClose);
+  }
+
+  private scheduleDisconnect(jobId: string): void {
+    if (this.disconnectTimers.has(jobId)) {
+      return;
+    }
+
+    const execute = () => {
+      this.disconnectTimers.delete(jobId);
+      const subscribers = this.streamSubscriptions.get(jobId);
+      if (subscribers && subscribers.size > 0) {
+        return;
+      }
+
+      if (this.jobControllers.has(jobId)) {
+        this.logger.warn({ jobId }, 'no active SSE subscribers; cancelling job after grace period');
+        this.cancelJob(jobId, 'SSE连接已断开且在宽限期内未恢复');
+        return;
+      }
+
+      this.streamSubscriptions.delete(jobId);
+    };
+
+    if (this.disconnectGraceMs <= 0) {
+      execute();
+      return;
+    }
+
+    const timer = setTimeout(execute, this.disconnectGraceMs);
+    timer.unref?.();
+    this.disconnectTimers.set(jobId, timer);
+  }
+
+  private clearDisconnectTimer(jobId: string): void {
+    const pending = this.disconnectTimers.get(jobId);
+    if (pending) {
+      clearTimeout(pending);
+      this.disconnectTimers.delete(jobId);
+    }
   }
 
   cancelJob(jobId: string, reason?: string): void {
@@ -106,6 +151,8 @@ class GenerationService {
       return;
     }
 
+    this.clearDisconnectTimer(jobId);
+
     const message = reason ?? 'Generation job cancelled by client';
     if (!this.cancelledJobReasons.has(jobId)) {
       this.cancelledJobReasons.set(jobId, message);
@@ -113,6 +160,40 @@ class GenerationService {
 
     this.logger.warn({ jobId, reason: message }, 'aborting generation job');
     controller.abort();
+  }
+
+  private getJobRequestId(metadata: GenerationJobDocument['metadata']): string | undefined {
+    if (!metadata || typeof metadata !== 'object') {
+      return undefined;
+    }
+    const value = (metadata as Record<string, unknown>).requestId;
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    return undefined;
+  }
+
+  private setJobRequestId(job: GenerationJobDocument, requestId: string): void {
+    if (!requestId) {
+      return;
+    }
+
+    const existing = this.getJobRequestId(job.metadata);
+    if (existing === requestId) {
+      return;
+    }
+
+    const metadata = (job.metadata && typeof job.metadata === 'object')
+      ? (job.metadata as Record<string, unknown>)
+      : {};
+
+    job.metadata = {
+      ...metadata,
+      requestId,
+    };
+
+    job.markModified?.('metadata');
+    this.emit(job.id, 'meta', { requestId });
   }
 
   async createChapterGenerationJob(
@@ -191,11 +272,15 @@ class GenerationService {
       });
 
       job.chapter = chapterDoc._id;
-      job.result = {
+      const resultPayload: Record<string, unknown> = {
         chapterId: chapterDoc._id,
         version: 1,
         content: chapterDoc.content,
       };
+      if (streamResult.requestId) {
+        resultPayload.requestId = streamResult.requestId;
+      }
+      job.result = resultPayload;
       job.markModified('result');
 
       await this.triggerMemorySync({
@@ -294,12 +379,16 @@ class GenerationService {
         },
       });
 
-      job.result = {
+      const continuationResult: Record<string, unknown> = {
         chapterId: updatedChapter._id,
         version: updatedChapter.versions[updatedChapter.versions.length - 1]?.version,
         content: updatedChapter.content,
         delta: streamResult.content,
       };
+      if (streamResult.requestId) {
+        continuationResult.requestId = streamResult.requestId;
+      }
+      job.result = continuationResult;
       job.markModified('result');
 
       await this.triggerMemorySync({
@@ -367,11 +456,17 @@ class GenerationService {
           cost: job.cost ?? 0,
         }, 'generation job completed');
 
-        this.emit(jobId, 'done', {
+        const requestId = this.getJobRequestId(job.metadata);
+        const donePayload: Record<string, unknown> = {
           jobId,
           status: 'completed',
           durationMs,
-        });
+        };
+        if (requestId) {
+          donePayload.requestId = requestId;
+        }
+
+        this.emit(jobId, 'done', donePayload);
       } catch (error) {
         const durationMs = Date.now() - startedAt;
         const cancellationReason = this.cancelledJobReasons.get(jobId);
@@ -422,11 +517,18 @@ class GenerationService {
     if (code) {
       errorPayload.code = code;
     }
+    const requestId = this.getJobRequestId(job.metadata);
+    if (requestId) {
+      errorPayload.requestId = requestId;
+    }
     this.emit(job.id, 'error', errorPayload);
 
     const donePayload: Record<string, unknown> = { jobId: job.id, status: 'failed' };
     if (code) {
       donePayload.code = code;
+    }
+    if (requestId) {
+      donePayload.requestId = requestId;
     }
     this.emit(job.id, 'done', donePayload);
   }
@@ -450,6 +552,8 @@ class GenerationService {
   }
 
   private finish(jobId: string): void {
+    this.clearDisconnectTimer(jobId);
+
     const subscribers = this.streamSubscriptions.get(jobId);
     if (!subscribers) {
       return;
@@ -534,29 +638,46 @@ class GenerationService {
     job: GenerationJobDocument,
     options: StreamChapterOptions,
     targetLength?: TargetLengthInput
-  ): Promise<{ content: string; usage?: UsageRecord; model: string; estimatedTokens: number }> {
+  ): Promise<{ content: string; usage?: UsageRecord; model: string; estimatedTokens: number; requestId?: string }> {
     let tokensGenerated = 0;
     let lastProgress = 0;
+    let requestId: string | undefined;
 
     const { signal, cleanup } = this.createOpenAISignal(options.signal);
+
+    const getEffectiveRequestId = () => requestId ?? this.getJobRequestId(job.metadata);
 
     try {
       const streamResult = await this.openAI.streamChapter({
         ...options,
         signal,
+        onRequestId: (value: string) => {
+          requestId = value;
+          this.setJobRequestId(job, value);
+        },
         onDelta: (delta: string) => {
           tokensGenerated += this.estimateTokens(delta);
           const progress = this.estimateProgress(tokensGenerated, targetLength);
           if (progress > lastProgress) {
             lastProgress = progress;
             job.progress = progress;
-            this.emit(job.id, 'progress', {
+            const progressPayload: Record<string, unknown> = {
               jobId: job.id,
               progress,
               tokensGenerated,
-            });
+            };
+            const effectiveRequestId = getEffectiveRequestId();
+            if (effectiveRequestId) {
+              progressPayload.requestId = effectiveRequestId;
+            }
+            this.emit(job.id, 'progress', progressPayload);
           }
-          this.emit(job.id, 'delta', { text: delta });
+          const deltaPayload: Record<string, unknown> = { text: delta };
+          const effectiveRequestId = getEffectiveRequestId();
+          if (effectiveRequestId) {
+            deltaPayload.requestId = effectiveRequestId;
+          }
+          this.emit(job.id, 'delta', deltaPayload);
         },
       });
 
@@ -567,11 +688,17 @@ class GenerationService {
       job.tokensGenerated = tokensGenerated;
       job.progress = Math.max(job.progress ?? 0, lastProgress);
 
+      if (streamResult.requestId) {
+        requestId = streamResult.requestId;
+        this.setJobRequestId(job, streamResult.requestId);
+      }
+
       return {
         content: streamResult.content,
         usage: streamResult.usage,
         model: streamResult.model,
         estimatedTokens: tokensGenerated,
+        requestId: getEffectiveRequestId(),
       };
     } finally {
       cleanup();
