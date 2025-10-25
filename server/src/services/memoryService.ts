@@ -50,6 +50,7 @@ const CATEGORY_KEY_PREFIX: Record<string, string> = {
 export interface MemoryRefInput {
   chapterId?: string | Types.ObjectId;
   label?: string;
+  addedAt?: Date;
 }
 
 export interface MemorySyncItemInput {
@@ -310,7 +311,11 @@ class MemoryService {
         return;
       }
       seen.add(key);
-      refs.push({ chapterId: ref.chapterId, label: ref.label });
+      refs.push({
+        chapterId: ref.chapterId,
+        label: ref.label,
+        addedAt: ref.addedAt ?? new Date(),
+      });
     });
 
     return refs.slice(0, MAX_REFS_PER_ITEM);
@@ -363,7 +368,11 @@ class MemoryService {
         return;
       }
       seen.add(dedupeKey);
-      result.push({ chapterId: objectId, label });
+      result.push({
+        chapterId: objectId,
+        label,
+        addedAt: ref.addedAt instanceof Date ? ref.addedAt : new Date(),
+      });
     });
 
     return result.slice(0, MAX_REFS_PER_ITEM);
