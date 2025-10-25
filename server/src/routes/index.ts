@@ -9,6 +9,7 @@ import {
   revertChapterVersion,
   updateChapter,
 } from '../controllers/chapterController';
+import { getProjectEditorContext } from '../controllers/projectController';
 import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
 import { streamJob } from '../controllers/streamController';
 import {
@@ -39,6 +40,7 @@ import {
 
 const router = Router();
 
+router.get('/projects/:projectId/editor-context', getProjectEditorContext);
 router.get('/projects/:projectId/chapters', listChapters);
 router.get('/projects/:projectId/chapters/:chapterId', getChapter);
 router.patch(

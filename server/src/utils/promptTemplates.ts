@@ -44,6 +44,7 @@ export interface ChapterPromptOptions {
     unit: 'characters' | 'paragraphs';
     value: number;
   };
+  model?: string;
 }
 
 function buildStyleDirective(style: PromptStyleProfile = {}): string {
@@ -162,8 +163,10 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
     .filter(Boolean)
     .join('\n\n');
 
+  const resolvedModel = options.model || process.env.OPENAI_CHAPTER_MODEL || process.env.OPENAI_DEFAULT_MODEL;
+
   return {
-    model: process.env.OPENAI_CHAPTER_MODEL || process.env.OPENAI_DEFAULT_MODEL,
+    model: resolvedModel,
     temperature: continuation ? 0.6 : 0.7,
     messages: [
       {
