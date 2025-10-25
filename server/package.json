@@ -16,6 +16,7 @@
     "express": "^4.19.2",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
+    "jsonrepair": "^3.13.1",
     "mongoose": "^7.6.3",
     "nanoid": "^4.0.2",
     "openai": "^4.56.0",

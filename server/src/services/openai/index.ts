@@ -86,6 +86,9 @@ export interface ChatMessage {
 export interface ChatCompletionOptions {
   model?: string;
   temperature?: number;
+  topP?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
   maxTokens?: number;
   responseFormat?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
@@ -195,12 +198,23 @@ class OpenAIService {
     const model = prompt.model || this.defaultModel;
 
     return this.withClient(async (client, keyDoc) => {
-      const params = {
-        ...prompt,
+      const params: Record<string, unknown> = {
         model,
+        messages: prompt.messages,
+        temperature: prompt.temperature ?? 0.7,
         stream: true,
         signal: options.signal,
-      } as Record<string, unknown>;
+      };
+
+      if (prompt.topP !== undefined) {
+        params.top_p = prompt.topP;
+      }
+      if (prompt.presencePenalty !== undefined) {
+        params.presence_penalty = prompt.presencePenalty;
+      }
+      if (prompt.maxTokens !== undefined) {
+        params.max_tokens = prompt.maxTokens;
+      }
 
       let usage: UsageRecord | undefined;
       let requestId: string | undefined;
@@ -268,12 +282,23 @@ class OpenAIService {
         temperature: options.temperature ?? 0.7,
       };
 
-      if (options.maxTokens) {
+      if (options.topP !== undefined) {
+        params.top_p = options.topP;
+      }
+      if (options.presencePenalty !== undefined) {
+        params.presence_penalty = options.presencePenalty;
+      }
+      if (options.frequencyPenalty !== undefined) {
+        params.frequency_penalty = options.frequencyPenalty;
+      }
+      if (options.maxTokens !== undefined) {
         params.max_tokens = options.maxTokens;
       }
-
       if (options.responseFormat) {
         params.response_format = options.responseFormat;
+      }
+      if (options.metadata) {
+        params.metadata = options.metadata;
       }
 
       const response = (await client.chat.completions.create(params)) as ChatCompletionResponse;
