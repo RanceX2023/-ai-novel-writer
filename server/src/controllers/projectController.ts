@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Types } from 'mongoose';
 import ProjectModel, { Project, StyleProfile as ProjectStyleProfile } from '../models/Project';
 import OutlineNodeModel from '../models/OutlineNode';
+import StyleProfileModel, { StyleProfileAttributes as StoredStyleProfile } from '../models/StyleProfile';
 import ApiError from '../utils/ApiError';
 import { ProjectCreateInput, ProjectStyleInput } from '../validators/project';
 
@@ -107,6 +108,35 @@ export const saveProjectStyle = async (req: Request, res: Response, next: NextFu
     };
 
     await project.save();
+
+    if (project.styleProfile) {
+      const updatePayload: Partial<StoredStyleProfile> & { project: Types.ObjectId; name: string } = {
+        project: projectId,
+        name: '默认风格',
+        tone: project.styleProfile.tone ?? undefined,
+        pacing: project.styleProfile.pacing ?? undefined,
+        pov: project.styleProfile.pov ?? undefined,
+        diction: project.styleProfile.diction ?? undefined,
+        authors: project.styleProfile.authors ?? [],
+        language: project.styleProfile.language ?? undefined,
+        notes: project.styleProfile.notes ?? undefined,
+      };
+      if (typeof project.styleProfile.styleStrength === 'number') {
+        updatePayload.styleStrength = project.styleProfile.styleStrength;
+      }
+
+      Object.keys(updatePayload).forEach((key) => {
+        if (updatePayload[key as keyof StoredStyleProfile] === undefined) {
+          delete updatePayload[key as keyof StoredStyleProfile];
+        }
+      });
+
+      await StyleProfileModel.findOneAndUpdate(
+        { project: projectId, name: '默认风格' },
+        updatePayload,
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      ).exec();
+    }
 
     const saved = project.toObject();
     res.json({

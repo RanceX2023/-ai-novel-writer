@@ -7,7 +7,9 @@ import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson, HttpError } from '../utils/api';
 import { cancelStreamJob } from '../api/stream';
 import { getProjectStyle, saveProjectStyle } from '../api/projects';
+import { listCharacters, createCharacter, updateCharacter, deleteCharacter } from '../api/characters';
 import OutlinePanel from '../components/outline/OutlinePanel';
+import CharacterPanel from '../components/project/CharacterPanel';
 import StyleFormFields from '../components/project/StyleFormFields';
 import { useToast } from '../components/ui/ToastProvider';
 import {
@@ -18,6 +20,16 @@ import {
   styleFormValuesToPayload,
   styleProfileToFormValues,
 } from '../utils/styleForm';
+import {
+  Character,
+  CharacterCreatePayload,
+  CharacterUpdatePayload,
+} from '../types/character';
+import {
+  CharacterFormValues,
+  characterFormValuesToCreatePayload,
+  characterFormValuesToUpdatePayload,
+} from '../utils/characterForm';
 import { StyleProfile } from '../types/project';
 
 interface ProjectOutlineNode {
@@ -210,6 +222,8 @@ const ProjectEditorPage = () => {
   });
   const [draftContent, setDraftContent] = useState<string>('');
   const [selectedMemoryIds, setSelectedMemoryIds] = useState<Set<string>>(new Set());
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<Set<string>>(new Set());
+  const [pendingCharacterDeleteId, setPendingCharacterDeleteId] = useState<string | null>(null);
   const [pendingChapterSelect, setPendingChapterSelect] = useState<'new' | null>(null);
 
   const [streamState, setStreamState] = useState<StreamState>({
@@ -256,6 +270,14 @@ const ProjectEditorPage = () => {
     enabled: Boolean(projectId),
     staleTime: 30_000,
     initialData: () => projectQuery.data?.styleProfile ?? undefined,
+  });
+
+  const charactersQuery = useQuery({
+    queryKey: ['project-characters', projectId],
+    queryFn: () => listCharacters(projectId!).then((data) => data.characters),
+    enabled: Boolean(projectId),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
 
   const chaptersQuery = useQuery({
@@ -308,6 +330,17 @@ const ProjectEditorPage = () => {
       return filtered.length === prev.size ? prev : new Set(filtered);
     });
   }, [memoryQuery.data]);
+
+  useEffect(() => {
+    if (!charactersQuery.data) {
+      return;
+    }
+    const validIds = new Set(charactersQuery.data.map((character) => character.id));
+    setSelectedCharacterIds((prev) => {
+      const filtered = Array.from(prev).filter((id) => validIds.has(id));
+      return filtered.length === prev.size ? prev : new Set(filtered);
+    });
+  }, [charactersQuery.data]);
 
   useEffect(() => {
     if (isStyleSheetOpen) {
@@ -757,6 +790,7 @@ const ProjectEditorPage = () => {
     cleanupStream();
     setDraftContent('');
     setPendingChapterSelect(null);
+    setSelectedCharacterIds(new Set());
   }, [cleanupStream, projectId]);
 
   const handleCancelStream = useCallback(async () => {
@@ -841,18 +875,21 @@ const ProjectEditorPage = () => {
 
   const buildCommonPayload = useCallback(() => {
     const memoryIds = Array.from(selectedMemoryIds);
+    const characterIds = Array.from(selectedCharacterIds);
     const targetLength = targetLengthPayload(targetLengthValue, targetLengthUnit);
-    const styleOverride = Number.isFinite(styleStrength)
-      ? { strength: Math.max(0, Math.min(styleStrength, 1)) }
-      : undefined;
+    const intensity = Number.isFinite(styleStrength)
+      ? Math.max(0, Math.min(styleStrength, 1))
+      : null;
+    const styleOverride = intensity !== null ? { styleStrength: intensity, strength: intensity } : undefined;
 
     return {
       memoryIds: memoryIds.length ? memoryIds : undefined,
+      characterIds: characterIds.length ? characterIds : undefined,
       targetLength,
       styleOverride,
       model: selectedModel,
     };
-  }, [selectedMemoryIds, targetLengthValue, targetLengthUnit, styleStrength, selectedModel]);
+  }, [selectedMemoryIds, selectedCharacterIds, targetLengthValue, targetLengthUnit, styleStrength, selectedModel]);
 
   const generateMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) =>
@@ -930,6 +967,124 @@ const ProjectEditorPage = () => {
       toast({ title: '续写失败', description, variant: 'error' });
     },
   });
+
+  const createCharacterMutation = useMutation({
+    mutationFn: (payload: CharacterCreatePayload) => {
+      if (!projectId) {
+        return Promise.reject(new Error('缺少项目 ID，无法创建人物卡。'));
+      }
+      return createCharacter(projectId, payload);
+    },
+    onSuccess: (data) => {
+      setSelectedCharacterIds((prev) => {
+        const next = new Set(prev);
+        next.add(data.character.id);
+        return next;
+      });
+      toast({ title: '人物卡已创建', description: `${data.character.name} 已加入人物列表。`, variant: 'success' });
+      if (projectId) {
+        void queryClient.invalidateQueries({ queryKey: ['project-characters', projectId] });
+      }
+    },
+    onError: (error) => {
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
+      toast({ title: '创建人物失败', description: message, variant: 'error' });
+    },
+  });
+
+  const updateCharacterMutation = useMutation({
+    mutationFn: ({ characterId, payload }: { characterId: string; payload: CharacterUpdatePayload }) => {
+      if (!projectId) {
+        return Promise.reject(new Error('缺少项目 ID，无法更新人物卡。'));
+      }
+      return updateCharacter(projectId, characterId, payload);
+    },
+    onSuccess: (data) => {
+      toast({ title: '人物卡已更新', description: `${data.character.name} 的设定已保存。`, variant: 'success' });
+      if (projectId) {
+        void queryClient.invalidateQueries({ queryKey: ['project-characters', projectId] });
+      }
+    },
+    onError: (error) => {
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
+      toast({ title: '更新人物失败', description: message, variant: 'error' });
+    },
+  });
+
+  const deleteCharacterMutation = useMutation({
+    mutationFn: (characterId: string) => {
+      if (!projectId) {
+        return Promise.reject(new Error('缺少项目 ID，无法删除人物卡。'));
+      }
+      return deleteCharacter(projectId, characterId);
+    },
+    onSuccess: (_data, characterId) => {
+      setSelectedCharacterIds((prev) => {
+        const next = new Set(prev);
+        next.delete(characterId);
+        return next;
+      });
+      toast({ title: '人物卡已删除', description: '该人物设定已移除。', variant: 'success' });
+      if (projectId) {
+        void queryClient.invalidateQueries({ queryKey: ['project-characters', projectId] });
+      }
+    },
+    onError: (error) => {
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
+      toast({ title: '删除人物失败', description: message, variant: 'error' });
+    },
+  });
+
+  const handleCreateCharacter = useCallback(
+    async (values: CharacterFormValues) => {
+      const payload = characterFormValuesToCreatePayload(values);
+      await createCharacterMutation.mutateAsync(payload);
+    },
+    [createCharacterMutation]
+  );
+
+  const handleUpdateCharacter = useCallback(
+    async (characterId: string, values: CharacterFormValues) => {
+      const payload = characterFormValuesToUpdatePayload(values);
+      await updateCharacterMutation.mutateAsync({ characterId, payload });
+    },
+    [updateCharacterMutation]
+  );
+
+  const handleDeleteCharacter = useCallback(
+    async (characterId: string) => {
+      setPendingCharacterDeleteId(characterId);
+      try {
+        await deleteCharacterMutation.mutateAsync(characterId);
+      } finally {
+        setPendingCharacterDeleteId(null);
+      }
+    },
+    [deleteCharacterMutation]
+  );
+
+  const handleToggleCharacterSelection = useCallback((characterId: string) => {
+    setSelectedCharacterIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(characterId)) {
+        next.delete(characterId);
+      } else {
+        next.add(characterId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectAllCharacters = useCallback(() => {
+    if (!charactersQuery.data) {
+      return;
+    }
+    setSelectedCharacterIds(new Set(charactersQuery.data.map((character) => character.id)));
+  }, [charactersQuery.data]);
+
+  const handleClearCharacterSelection = useCallback(() => {
+    setSelectedCharacterIds(new Set());
+  }, []);
 
   const styleSaveMutation = useMutation({
     mutationFn: (values: StyleFormValues) => {
@@ -1290,6 +1445,30 @@ const ProjectEditorPage = () => {
     );
   }
 
+  const characters = charactersQuery.data ?? [];
+  const charactersErrorMessage = useMemo(() => {
+    if (!charactersQuery.error) {
+      return null;
+    }
+    if (charactersQuery.error instanceof HttpError) {
+      return charactersQuery.error.message;
+    }
+    if (charactersQuery.error instanceof Error) {
+      return charactersQuery.error.message;
+    }
+    return '人物卡加载失败，请稍后重试。';
+  }, [charactersQuery.error]);
+  const isCharacterSaving = createCharacterMutation.isPending || updateCharacterMutation.isPending;
+  const selectedCharacters = useMemo(() => {
+    if (!characters.length || selectedCharacterIds.size === 0) {
+      return [] as Character[];
+    }
+    const byId = new Map(characters.map((character) => [character.id, character]));
+    return Array.from(selectedCharacterIds)
+      .map((id) => byId.get(id))
+      .filter((character): character is Character => Boolean(character));
+  }, [characters, selectedCharacterIds]);
+
   const isActiveStream = streamState.status === 'streaming' || streamState.status === 'pending';
   const isStreaming = isActiveStream || isCancelling;
   const projectName = projectQuery.data?.name ?? '未命名项目';
@@ -1475,7 +1654,22 @@ const ProjectEditorPage = () => {
         </div>
       </header>
 
-      <main className="mx-auto mt-6 grid max-w-7xl gap-6 px-4 lg:grid-cols-[280px,1fr,280px]">
+      <main className="mx-auto mt-6 max-w-7xl space-y-6 px-4">
+        <CharacterPanel
+          characters={characters}
+          isLoading={charactersQuery.isLoading}
+          error={charactersErrorMessage}
+          onCreate={handleCreateCharacter}
+          onUpdate={handleUpdateCharacter}
+          onDelete={handleDeleteCharacter}
+          isSaving={isCharacterSaving}
+          deletingId={pendingCharacterDeleteId}
+          selectedIds={selectedCharacterIds}
+          onToggleSelection={handleToggleCharacterSelection}
+          onSelectAll={handleSelectAllCharacters}
+          onClearSelection={handleClearCharacterSelection}
+        />
+        <div className="grid gap-6 lg:grid-cols-[280px,1fr,280px]">
         <aside className="space-y-6">
           <OutlinePanel projectId={projectId} selectedNodeId={selectedOutlineId} onSelectNode={setSelectedOutlineId} />
 
@@ -1687,6 +1881,54 @@ const ProjectEditorPage = () => {
                 </div>
               </div>
 
+              <div className="rounded-2xl border border-slate-800/60 bg-slate-950/40 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">参与人物</p>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      已选择 {selectedCharacterIds.size} / {characters.length} 人物
+                    </p>
+                    {selectedCharacters.length ? (
+                      <ul className="mt-3 max-h-52 space-y-2 overflow-y-auto pr-1 text-xs text-slate-300">
+                        {selectedCharacters.map((character) => (
+                          <li
+                            key={character.id}
+                            className="rounded-xl border border-slate-800/70 bg-slate-950/50 px-3 py-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm font-semibold text-slate-100">{character.name}</p>
+                              {character.role ? (
+                                <span className="text-[11px] text-slate-400">{character.role}</span>
+                              ) : null}
+                            </div>
+                            {character.voice ? (
+                              <p className="mt-1 text-[11px] text-slate-400">语气提示：{character.voice}</p>
+                            ) : null}
+                            {character.goals || character.conflicts ? (
+                              <p className="mt-1 text-[11px] leading-5 text-slate-400">
+                                {character.goals ? `目标：${character.goals}` : ''}
+                                {character.goals && character.conflicts ? '；' : ''}
+                                {character.conflicts ? `冲突：${character.conflicts}` : ''}
+                              </p>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-500">
+                        尚未选择人物卡，生成时将根据现有章节上下文推断角色。
+                      </p>
+                    )}
+                  </div>
+                  <a
+                    href="#character-panel"
+                    className="rounded-full border border-slate-800/70 px-3 py-1 text-[11px] text-slate-300 transition hover:border-brand/50 hover:text-brand"
+                  >
+                    管理人物
+                  </a>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
                   风格强度
@@ -1739,6 +1981,7 @@ const ProjectEditorPage = () => {
             </div>
           </section>
         </aside>
+        </div>
       </main>
 
       {isStyleSheetOpen ? (
