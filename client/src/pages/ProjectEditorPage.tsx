@@ -1,11 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson, HttpError } from '../utils/api';
 import { cancelStreamJob } from '../api/stream';
+import { getProjectStyle, saveProjectStyle } from '../api/projects';
 import OutlinePanel from '../components/outline/OutlinePanel';
+import StyleFormFields from '../components/project/StyleFormFields';
 import { useToast } from '../components/ui/ToastProvider';
+import {
+  clampStrength,
+  defaultStyleFormValues,
+  StyleFormValues,
+  styleFormSchema,
+  styleFormValuesToPayload,
+  styleProfileToFormValues,
+} from '../utils/styleForm';
+import { StyleProfile } from '../types/project';
 
 interface ProjectOutlineNode {
   id: string;
@@ -19,6 +32,7 @@ interface ProjectContext {
   name: string;
   synopsis?: string | null;
   outline: ProjectOutlineNode[];
+  styleProfile?: StyleProfile | null;
 }
 
 interface ChapterSummary {
@@ -157,6 +171,19 @@ function targetLengthPayload(value: number, unit: 'characters' | 'paragraphs') {
   return { unit, value: trimmed } as const;
 }
 
+function buildStyleSummary(style?: StyleProfile | null): string {
+  if (!style) {
+    return '尚未设置风格参数';
+  }
+  const parts = [style.diction, style.tone, style.pacing, style.pov]
+    .map((item) => (item ? item.trim() : ''))
+    .filter(Boolean);
+  if (!parts.length) {
+    return '尚未设置风格参数';
+  }
+  return parts.join(' · ');
+}
+
 const STREAM_PLACEHOLDER = '点击「生成章节」或「续写」即可在此处看到 AI 的实时输出。';
 const MAX_RECONNECT_ATTEMPTS = 5;
 const AUTO_SAVE_INTERVAL = 2600;
@@ -176,6 +203,11 @@ const ProjectEditorPage = () => {
   const [targetLengthUnit, setTargetLengthUnit] = useState<'characters' | 'paragraphs'>('characters');
   const [targetLengthValue, setTargetLengthValue] = useState<number>(1600);
   const [styleStrength, setStyleStrength] = useState<number>(0.65);
+  const [isStyleSheetOpen, setIsStyleSheetOpen] = useState(false);
+  const styleForm = useForm<StyleFormValues>({
+    resolver: zodResolver(styleFormSchema),
+    defaultValues: defaultStyleFormValues,
+  });
   const [draftContent, setDraftContent] = useState<string>('');
   const [selectedMemoryIds, setSelectedMemoryIds] = useState<Set<string>>(new Set());
   const [pendingChapterSelect, setPendingChapterSelect] = useState<'new' | null>(null);
@@ -200,6 +232,7 @@ const ProjectEditorPage = () => {
   const currentVersionRef = useRef<number | null>(null);
   const pendingTokensRef = useRef<string[]>([]);
   const rafRef = useRef<number | null>(null);
+  const styleStrengthInitializedRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const isManualCancelRef = useRef(false);
@@ -215,6 +248,14 @@ const ProjectEditorPage = () => {
     queryFn: () => fetchJson<{ project: ProjectContext }>(`/api/projects/${projectId}/editor-context`).then((data) => data.project),
     enabled: Boolean(projectId),
     staleTime: 60_000,
+  });
+
+  const styleQuery = useQuery({
+    queryKey: ['project-style', projectId],
+    queryFn: () => getProjectStyle(projectId!).then((data) => data.style),
+    enabled: Boolean(projectId),
+    staleTime: 30_000,
+    initialData: () => projectQuery.data?.styleProfile ?? undefined,
   });
 
   const chaptersQuery = useQuery({
@@ -247,6 +288,10 @@ const ProjectEditorPage = () => {
     staleTime: 60_000,
   });
 
+  const latestStyleProfile = useMemo<StyleProfile | null>(() => {
+    return styleQuery.data ?? projectQuery.data?.styleProfile ?? null;
+  }, [styleQuery.data, projectQuery.data?.styleProfile]);
+
   useEffect(() => {
     streamModeRef.current = streamState.mode;
   }, [streamState.mode]);
@@ -264,10 +309,39 @@ const ProjectEditorPage = () => {
     });
   }, [memoryQuery.data]);
 
+  useEffect(() => {
+    if (isStyleSheetOpen) {
+      return;
+    }
+    if (!styleForm.formState.isDirty) {
+      styleForm.reset(styleProfileToFormValues(latestStyleProfile));
+    }
+  }, [isStyleSheetOpen, latestStyleProfile, styleForm, styleForm.formState.isDirty]);
+
+  useEffect(() => {
+    if (!isStyleSheetOpen) {
+      return;
+    }
+    styleForm.reset(styleProfileToFormValues(latestStyleProfile));
+  }, [isStyleSheetOpen, latestStyleProfile, styleForm]);
+
+  useEffect(() => {
+    const remoteStrength =
+      typeof latestStyleProfile?.styleStrength === 'number'
+        ? clampStrength(latestStyleProfile.styleStrength)
+        : null;
+    if (remoteStrength !== null) {
+      styleStrengthInitializedRef.current = true;
+      setStyleStrength(remoteStrength);
+    } else if (!styleStrengthInitializedRef.current) {
+      styleStrengthInitializedRef.current = true;
+      setStyleStrength(defaultStyleFormValues.styleStrength);
+    }
+  }, [latestStyleProfile?.styleStrength]);
 
 
   useEffect(() => {
-    if (!chaptersQuery.data?.length) {
+
       setSelectedChapterId(null);
       return;
     }
@@ -857,6 +931,42 @@ const ProjectEditorPage = () => {
     },
   });
 
+  const styleSaveMutation = useMutation({
+    mutationFn: (values: StyleFormValues) => {
+      if (!projectId) {
+        return Promise.reject(new Error('缺少项目 ID，无法保存风格。'));
+      }
+      return saveProjectStyle(projectId, styleFormValuesToPayload(values));
+    },
+    onSuccess: (data) => {
+      const profile = data.project.styleProfile ?? null;
+      styleForm.reset(styleProfileToFormValues(profile));
+      if (projectId) {
+        queryClient.setQueryData<StyleProfile | null>(['project-style', projectId], profile);
+        queryClient.setQueryData<ProjectContext | undefined>(
+          ['project-editor-context', projectId],
+          (prev) => (prev ? { ...prev, styleProfile: profile } : prev)
+        );
+        queryClient.invalidateQueries({ queryKey: ['project-style', projectId] });
+        queryClient.invalidateQueries({ queryKey: ['project-editor-context', projectId] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['project-list'] });
+      setIsStyleSheetOpen(false);
+      if (typeof profile?.styleStrength === 'number') {
+        styleStrengthInitializedRef.current = true;
+        setStyleStrength(clampStrength(profile.styleStrength));
+      } else {
+        styleStrengthInitializedRef.current = true;
+        setStyleStrength(defaultStyleFormValues.styleStrength);
+      }
+      toast({ title: '风格设定已保存', description: '生成参数已同步更新。', variant: 'success' });
+    },
+    onError: (error: Error) => {
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
+      toast({ title: '保存失败', description: message, variant: 'error' });
+    },
+  });
+
   const updateChapterRequest = (payload: ChapterUpdatePayload) => {
     if (!projectId || !selectedChapterId) {
       return Promise.reject(new Error('缺少章节信息，无法保存。'));
@@ -1152,6 +1262,26 @@ const ProjectEditorPage = () => {
     }
   }, [draftContent, toast]);
 
+  const handleOpenStyleSheet = () => {
+    if (styleSaveMutation.isPending) {
+      return;
+    }
+    styleForm.reset(styleProfileToFormValues(latestStyleProfile));
+    setIsStyleSheetOpen(true);
+  };
+
+  const handleCloseStyleSheet = () => {
+    if (styleSaveMutation.isPending) {
+      return;
+    }
+    setIsStyleSheetOpen(false);
+    styleForm.reset(styleProfileToFormValues(latestStyleProfile));
+  };
+
+  const handleStyleSubmit = styleForm.handleSubmit((values) => {
+    styleSaveMutation.mutate(values);
+  });
+
   if (!projectId) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-200">
@@ -1164,6 +1294,8 @@ const ProjectEditorPage = () => {
   const isStreaming = isActiveStream || isCancelling;
   const projectName = projectQuery.data?.name ?? '未命名项目';
   const activeChapter = chaptersQuery.data?.find((chapter) => chapter.id === selectedChapterId) ?? null;
+  const styleSummary = buildStyleSummary(latestStyleProfile);
+  const styleLanguage = latestStyleProfile?.language?.trim() || defaultStyleFormValues.language;
 
   const statusLabel = (() => {
     if (isCancelling) {
@@ -1524,6 +1656,37 @@ const ProjectEditorPage = () => {
                 </div>
               </div>
 
+              <div className="rounded-2xl border border-slate-800/60 bg-slate-950/40 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">默认风格</p>
+                    <p className="text-sm text-slate-200">{styleSummary}</p>
+                    {latestStyleProfile?.authors?.length ? (
+                      <p className="text-xs text-slate-500">
+                        作家模仿：{latestStyleProfile.authors.join('、')}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-slate-500">作家模仿：未设置</p>
+                    )}
+                    <p className="text-xs text-slate-500">目标语言：{styleLanguage}</p>
+                    {styleQuery.isFetching ? (
+                      <p className="text-[11px] text-slate-500">同步中…</p>
+                    ) : null}
+                    {styleQuery.error ? (
+                      <p className="text-xs text-rose-400">风格信息加载失败，请稍后重试。</p>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleOpenStyleSheet}
+                    disabled={styleSaveMutation.isPending}
+                    className="inline-flex items-center justify-center rounded-full border border-brand/40 px-4 py-1.5 text-xs font-medium text-brand transition hover:border-brand/70 hover:text-brand/90 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+                  >
+                    调整风格
+                  </button>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
                   风格强度
@@ -1577,6 +1740,49 @@ const ProjectEditorPage = () => {
           </section>
         </aside>
       </main>
+
+      {isStyleSheetOpen ? (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-slate-950/80 px-4 py-10">
+          <div className="relative w-full max-w-2xl rounded-3xl border border-slate-800/70 bg-slate-950/95 p-6 shadow-2xl">
+            <button
+              type="button"
+              onClick={handleCloseStyleSheet}
+              className="absolute right-4 top-4 rounded-full p-1 text-slate-500 transition hover:bg-slate-800/60 hover:text-slate-200 disabled:cursor-not-allowed"
+              aria-label="关闭风格设定"
+              disabled={styleSaveMutation.isPending}
+            >
+              ×
+            </button>
+            <h2 className="text-lg font-semibold text-slate-100">项目风格设定</h2>
+            <p className="mt-1 text-sm text-slate-400">更新默认风格参数，保存后章节生成将自动引用。</p>
+            <form className="mt-6 space-y-5" onSubmit={handleStyleSubmit}>
+              <StyleFormFields form={styleForm} disabled={styleSaveMutation.isPending} />
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-slate-500">
+                  建议结合章节内容随时调节，风格强度可在生成面板中快速微调。
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseStyleSheet}
+                    disabled={styleSaveMutation.isPending}
+                    className="rounded-full border border-slate-700/70 px-4 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:text-slate-100 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-600"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={styleSaveMutation.isPending}
+                    className="rounded-full bg-brand px-4 py-2 text-xs font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700"
+                  >
+                    {styleSaveMutation.isPending ? '保存中…' : '保存风格'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

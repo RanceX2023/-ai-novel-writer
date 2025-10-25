@@ -1,41 +1,41 @@
 import clsx from 'clsx';
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchJson } from '../utils/api';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { useForm } from 'react-hook-form';
+import { z } from 'zod';
+import { createProject, getProjectStyle, listProjects, saveProjectStyle } from '../api/projects';
+import StyleFormFields from '../components/project/StyleFormFields';
 import { useToast } from '../components/ui/ToastProvider';
-
-interface ProjectStyleSummary {
-  genre?: string | null;
-  tone?: string | null;
-  pacing?: string | null;
-  pov?: string | null;
-  voice?: string | null;
-  language?: string | null;
-}
-
-interface ProjectSummary {
-  id: string;
-  name: string;
-  synopsis?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-  styleProfile?: ProjectStyleSummary | null;
-}
-
-interface ProjectsResponse {
-  projects: ProjectSummary[];
-}
-
-interface ProjectResponse {
-  project: ProjectSummary;
-}
+import { HttpError } from '../utils/api';
+import {
+  defaultStyleFormValues,
+  StyleFormValues,
+  styleFormSchema,
+  styleFormValuesToPayload,
+  styleProfileToFormValues,
+} from '../utils/styleForm';
+import { ProjectSummary, StyleProfile } from '../types/project';
 
 interface ProjectSetupPageProps {
   defaultProjectId?: string;
 }
 
-const DEFAULT_LANGUAGE = '中文';
+const createProjectSchema = styleFormSchema.extend({
+  name: z
+    .string()
+    .trim()
+    .min(1, '请填写项目名称')
+    .max(120, '项目名称最多 120 个字符'),
+});
+
+type CreateProjectFormValues = z.infer<typeof createProjectSchema>;
+
+const defaultCreateValues: CreateProjectFormValues = {
+  name: '',
+  ...defaultStyleFormValues,
+};
 
 function formatTimestamp(value?: string | null): string {
   if (!value) {
@@ -48,11 +48,11 @@ function formatTimestamp(value?: string | null): string {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
-function buildStyleSummary(style?: ProjectStyleSummary | null): string {
+function buildStyleSummary(style?: StyleProfile | null): string {
   if (!style) {
     return '尚未设置风格参数';
   }
-  const parts = [style.genre, style.tone, style.pacing, style.pov]
+  const parts = [style.diction, style.tone, style.pacing, style.pov]
     .map((item) => (item ? item.trim() : ''))
     .filter(Boolean);
   if (!parts.length) {
@@ -61,252 +61,227 @@ function buildStyleSummary(style?: ProjectStyleSummary | null): string {
   return parts.join(' · ');
 }
 
-interface StyleFormState {
-  genre: string;
-  tone: string;
-  pacing: string;
-  pov: string;
-  voice: string;
-  language: string;
-}
-
-const createEmptyStyleForm = (): StyleFormState => ({
-  genre: '',
-  tone: '',
-  pacing: '',
-  pov: '',
-  voice: '',
-  language: DEFAULT_LANGUAGE,
-});
-
-interface StylePayload {
-  genre: string;
-  tone: string;
-  pacing: string;
-  pov: string;
-  voice?: string;
-  language?: string;
-}
-
-interface StyleMutationVariables {
-  projectId: string;
-  payload: StylePayload;
-}
-
 const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const [createForm, setCreateForm] = useState<{ name: string } & StyleFormState>({
-    name: '',
-    ...createEmptyStyleForm(),
-  });
-  const [styleForm, setStyleForm] = useState<StyleFormState>(createEmptyStyleForm());
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [isCreating, setIsCreating] = useState(false);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
 
   const projectsQuery = useQuery({
     queryKey: ['project-list'],
-    queryFn: () => fetchJson<ProjectsResponse>('/api/projects'),
+    queryFn: listProjects,
     staleTime: 10_000,
   });
 
-  const postStyle = ({ projectId, payload }: StyleMutationVariables) =>
-    fetchJson<ProjectResponse>(`/api/projects/${projectId}/style`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+  const styleQuery = useQuery({
+    queryKey: ['project-style', selectedProjectId],
+    queryFn: async () => {
+      if (!selectedProjectId) {
+        return null;
+      }
+      const data = await getProjectStyle(selectedProjectId);
+      return data.style;
+    },
+    enabled: Boolean(selectedProjectId),
+    staleTime: 30_000,
+  });
+
+  const styleForm = useForm<StyleFormValues>({
+    resolver: zodResolver(styleFormSchema),
+    defaultValues: defaultStyleFormValues,
+  });
+
+  const createForm = useForm<CreateProjectFormValues>({
+    resolver: zodResolver(createProjectSchema),
+    defaultValues: defaultCreateValues,
+  });
 
   const createProjectMutation = useMutation({
-    mutationFn: (payload: { name: string }) =>
-      fetchJson<ProjectResponse>('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
+    mutationFn: (payload: { name: string }) => createProject(payload),
   });
 
-  const applyStyleMutation = useMutation({
-    mutationFn: postStyle,
+  const updateStyleMutation = useMutation({
+    mutationFn: ({ projectId, values }: { projectId: string; values: StyleFormValues }) =>
+      saveProjectStyle(projectId, styleFormValuesToPayload(values)),
+    onSuccess: (data, variables) => {
+      const styleProfile = data.project.styleProfile ?? null;
+      styleForm.reset(styleProfileToFormValues(styleProfile));
+      queryClient.invalidateQueries({ queryKey: ['project-style', variables.projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-list'] });
+      toast({ title: '风格设定已保存', description: '后续生成将默认应用该风格参数。', variant: 'success' });
+    },
+    onError: (error: Error) => {
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
+      toast({ title: '保存失败', description: message, variant: 'error' });
+    },
   });
-
-  const saveStyleMutation = useMutation({
-    mutationFn: postStyle,
-  });
-
-  const resetCreateForm = () => {
-    setCreateForm({ name: '', ...createEmptyStyleForm() });
-  };
 
   useEffect(() => {
-    if (!projectsQuery.data?.projects?.length) {
-      setActiveProjectId(null);
+    const projects = projectsQuery.data?.projects ?? [];
+    if (!projects.length) {
+      setSelectedProjectId(null);
       return;
     }
-    setActiveProjectId((current) => {
-      if (current && projectsQuery.data!.projects.some((project) => project.id === current)) {
+    setSelectedProjectId((current) => {
+      if (current && projects.some((project) => project.id === current)) {
         return current;
       }
-      if (defaultProjectId && projectsQuery.data!.projects.some((project) => project.id === defaultProjectId)) {
+      if (defaultProjectId && projects.some((project) => project.id === defaultProjectId)) {
         return defaultProjectId;
       }
-      return projectsQuery.data!.projects[0]?.id ?? null;
+      return projects[0]?.id ?? null;
     });
-  }, [defaultProjectId, projectsQuery.data]);
+  }, [defaultProjectId, projectsQuery.data?.projects]);
 
   useEffect(() => {
-    if (!projectsQuery.data?.projects) {
-      setStyleForm(createEmptyStyleForm());
+    if (!selectedProjectId) {
+      styleForm.reset(defaultStyleFormValues);
       return;
     }
-    const project = projectsQuery.data.projects.find((item) => item.id === activeProjectId);
-    if (!project?.styleProfile) {
-      setStyleForm(createEmptyStyleForm());
+    styleForm.reset(defaultStyleFormValues);
+  }, [selectedProjectId, styleForm]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
       return;
     }
-    setStyleForm({
-      genre: project.styleProfile.genre ?? '',
-      tone: project.styleProfile.tone ?? '',
-      pacing: project.styleProfile.pacing ?? '',
-      pov: project.styleProfile.pov ?? '',
-      voice: project.styleProfile.voice ?? '',
-      language: project.styleProfile.language ?? DEFAULT_LANGUAGE,
-    });
-  }, [activeProjectId, projectsQuery.data]);
-
-  const activeProject = useMemo(() => {
-    return projectsQuery.data?.projects.find((project) => project.id === activeProjectId) ?? null;
-  }, [activeProjectId, projectsQuery.data?.projects]);
-
-  const handleProjectCardKeyDown = (event: KeyboardEvent<HTMLDivElement>, projectId: string) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      setActiveProjectId(projectId);
+    if (styleQuery.isSuccess && !styleForm.formState.isDirty) {
+      styleForm.reset(styleProfileToFormValues(styleQuery.data));
     }
+  }, [selectedProjectId, styleQuery.data, styleQuery.isSuccess, styleForm]);
+
+  const selectedProject = useMemo<ProjectSummary | null>(() => {
+    if (!selectedProjectId) {
+      return null;
+    }
+    return projectsQuery.data?.projects.find((project) => project.id === selectedProjectId) ?? null;
+  }, [projectsQuery.data?.projects, selectedProjectId]);
+
+  const openCreateModal = () => {
+    createForm.reset(defaultCreateValues);
+    setIsCreateOpen(true);
   };
 
-  const updateCreateField = (field: keyof (typeof createForm), value: string) => {
-    setCreateForm((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
+  const closeCreateModal = () => {
+    setIsCreateOpen(false);
   };
 
-  const updateStyleField = (field: keyof StyleFormState, value: string) => {
-    setStyleForm((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
-  };
-
-  const buildStylePayload = (form: StyleFormState): StylePayload => {
-    const voice = form.voice.trim();
-    const language = form.language.trim() || DEFAULT_LANGUAGE;
-    return {
-      genre: form.genre.trim(),
-      tone: form.tone.trim(),
-      pacing: form.pacing.trim(),
-      pov: form.pov.trim(),
-      voice: voice ? voice : undefined,
-      language: language || DEFAULT_LANGUAGE,
-    };
-  };
-
-  const validateStyleForm = (form: StyleFormState): string | null => {
-    if (!form.genre.trim()) {
-      return '请填写题材';
-    }
-    if (!form.tone.trim()) {
-      return '请填写文风';
-    }
-    if (!form.pacing.trim()) {
-      return '请填写节奏';
-    }
-    if (!form.pov.trim()) {
-      return '请填写叙述视角';
-    }
-    if (!form.language.trim()) {
-      return '请填写目标语言';
-    }
-    return null;
-  };
-
-  const handleCreateSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (isCreating) {
-      return;
-    }
-    const projectName = createForm.name.trim();
-    if (!projectName) {
-      toast({ title: '请填写项目名称', variant: 'error' });
-      return;
-    }
-    const styleError = validateStyleForm(createForm);
-    if (styleError) {
-      toast({ title: '表单未完成', description: styleError, variant: 'error' });
-      return;
-    }
-    setIsCreating(true);
+  const handleCreateSubmit = createForm.handleSubmit(async (values) => {
+    const { name, ...styleValues } = values;
+    const trimmedName = name.trim();
+    const stylePayload = styleFormValuesToPayload(styleValues);
     try {
-      const { project } = await createProjectMutation.mutateAsync({ name: projectName });
-      await applyStyleMutation.mutateAsync({ projectId: project.id, payload: buildStylePayload(createForm) });
+      const { project } = await createProjectMutation.mutateAsync({ name: trimmedName });
+      let styleSaved = false;
+      try {
+        await saveProjectStyle(project.id, stylePayload);
+        styleSaved = true;
+      } catch (error) {
+        const message = error instanceof HttpError ? error.message : (error as Error).message;
+        toast({ title: '风格保存失败', description: message, variant: 'error' });
+      }
       await queryClient.invalidateQueries({ queryKey: ['project-list'] });
-      toast({ title: '项目创建成功', description: '已为新项目保存默认风格。', variant: 'success' });
-      resetCreateForm();
+      await queryClient.invalidateQueries({ queryKey: ['project-style', project.id] });
+      toast({
+        title: '项目创建成功',
+        description: styleSaved ? '默认风格已保存，正在跳转编辑器。' : '项目已创建，请在编辑器中补充风格设定。',
+        variant: 'success',
+      });
+      closeCreateModal();
       navigate(`/project/${project.id}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '创建项目失败，请稍后重试。';
+      const message = error instanceof HttpError ? error.message : (error as Error).message;
       toast({ title: '创建失败', description: message, variant: 'error' });
-    } finally {
-      setIsCreating(false);
     }
-  };
+  });
 
-  const handleStyleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!activeProjectId) {
+  const handleStyleSubmit = styleForm.handleSubmit((values) => {
+    if (!selectedProjectId) {
       toast({ title: '请选择项目', description: '请先从左侧列表中选择一个项目。', variant: 'error' });
       return;
     }
-    const styleError = validateStyleForm(styleForm);
-    if (styleError) {
-      toast({ title: '表单未完成', description: styleError, variant: 'error' });
-      return;
+    updateStyleMutation.mutate({ projectId: selectedProjectId, values });
+  });
+
+  const renderCreateModal = () => {
+    if (!isCreateOpen) {
+      return null;
     }
-    try {
-      await saveStyleMutation.mutateAsync({ projectId: activeProjectId, payload: buildStylePayload(styleForm) });
-      await queryClient.invalidateQueries({ queryKey: ['project-list'] });
-      toast({ title: '风格已保存', description: '后续生成将默认应用该风格参数。', variant: 'success' });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '保存风格失败，请稍后重试。';
-      toast({ title: '保存失败', description: message, variant: 'error' });
-    }
+    const isSubmitting = createForm.formState.isSubmitting || createProjectMutation.isPending;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4 py-10">
+        <div className="relative w-full max-w-xl rounded-3xl border border-slate-800/70 bg-slate-950/95 p-6 shadow-2xl">
+          <button
+            type="button"
+            onClick={closeCreateModal}
+            className="absolute right-4 top-4 rounded-full p-1 text-slate-500 transition hover:bg-slate-800/60 hover:text-slate-200"
+            aria-label="关闭创建窗口"
+          >
+            ×
+          </button>
+          <h2 className="text-lg font-semibold text-slate-100">新建项目</h2>
+          <p className="mt-1 text-sm text-slate-400">填写基础信息，将自动保存默认风格并跳转至编辑器。</p>
+          <form className="mt-6 space-y-5" onSubmit={handleCreateSubmit}>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">项目名称</label>
+              <input
+                type="text"
+                placeholder="请输入项目名称"
+                autoFocus
+                className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
+                {...createForm.register('name')}
+              />
+              {createForm.formState.errors.name?.message ? (
+                <p className="mt-2 text-xs text-rose-400">{createForm.formState.errors.name.message}</p>
+              ) : null}
+            </div>
+            <StyleFormFields form={createForm} />
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-300"
+            >
+              {isSubmitting ? '创建中…' : '创建项目并进入编辑器'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-900/80 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-col gap-2 px-6 py-8 sm:flex-row sm:items-end sm:justify-between">
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-6 py-8 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-xs uppercase tracking-[0.35em] text-slate-500">项目中心</p>
             <h1 className="text-2xl font-semibold tracking-wide text-slate-100">项目创建与风格设定</h1>
-            <p className="mt-2 text-sm text-slate-400">
-              创建新项目并配置默认风格参数，生成章节时将自动应用。
-            </p>
+            <p className="mt-2 text-sm text-slate-400">新建项目、配置默认风格，并在编辑器中快速开始创作。</p>
           </div>
-          {defaultProjectId ? (
-            <a
-              href={`/project/${defaultProjectId}`}
-              className="inline-flex items-center justify-center rounded-full border border-brand/40 bg-brand/15 px-4 py-2 text-xs font-medium text-brand shadow-glow transition hover:border-brand/60 hover:bg-brand/25"
+          <div className="flex flex-wrap items-center gap-3">
+            {defaultProjectId ? (
+              <a
+                href={`/project/${defaultProjectId}`}
+                className="inline-flex items-center justify-center rounded-full border border-brand/40 bg-brand/15 px-4 py-2 text-xs font-medium text-brand shadow-glow transition hover:border-brand/60 hover:bg-brand/25"
+              >
+                进入默认项目
+              </a>
+            ) : null}
+            <button
+              type="button"
+              onClick={openCreateModal}
+              className="inline-flex items-center justify-center rounded-full bg-brand px-4 py-2 text-xs font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90"
             >
-              进入默认项目
-            </a>
-          ) : null}
+              新建项目
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
-        <section className="grid gap-6 lg:grid-cols-[1.1fr,1fr]">
+        <section className="grid gap-6 lg:grid-cols-[1.15fr,1fr]">
           <div className="rounded-3xl border border-slate-900/70 bg-slate-950/60 p-6 shadow-xl">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-slate-100">项目列表</h2>
@@ -322,17 +297,24 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
             <div className="mt-5 space-y-3">
               {projectsQuery.isLoading ? (
                 <p className="text-sm text-slate-500">正在载入项目…</p>
+              ) : projectsQuery.error ? (
+                <p className="text-sm text-rose-400">加载项目列表失败，请稍后重试。</p>
               ) : projectsQuery.data?.projects?.length ? (
                 <ul className="space-y-3">
                   {projectsQuery.data.projects.map((project) => {
-                    const isActive = project.id === activeProjectId;
+                    const isActive = project.id === selectedProjectId;
                     return (
                       <li key={project.id}>
                         <div
                           role="button"
                           tabIndex={0}
-                          onClick={() => setActiveProjectId(project.id)}
-                          onKeyDown={(event) => handleProjectCardKeyDown(event, project.id)}
+                          onClick={() => setSelectedProjectId(project.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setSelectedProjectId(project.id);
+                            }
+                          }}
                           className={clsx(
                             'rounded-2xl border px-5 py-4 transition focus:outline-none focus:ring-2 focus:ring-brand/60',
                             isActive
@@ -341,8 +323,8 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                           )}
                         >
                           <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                              <p className="text-base font-semibold text-slate-100">{project.name}</p>
+                            <div className="min-w-0">
+                              <p className="truncate text-base font-semibold text-slate-100">{project.name}</p>
                               <p className="mt-1 text-xs text-slate-400">{buildStyleSummary(project.styleProfile)}</p>
                             </div>
                             <div className="flex flex-col items-end gap-2 text-xs text-slate-500">
@@ -367,235 +349,59 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                     );
                   })}
                 </ul>
-              ) : projectsQuery.error ? (
-                <p className="text-sm text-rose-400">加载项目列表失败，请稍后重试。</p>
               ) : (
-                <p className="text-sm text-slate-500">尚无项目，右侧表单即可创建第一个项目。</p>
+                <p className="text-sm text-slate-500">尚无项目，点击右上角「新建项目」即可创建。</p>
               )}
             </div>
           </div>
 
           <div className="rounded-3xl border border-slate-900/70 bg-slate-950/60 p-6 shadow-xl">
-            <h2 className="text-lg font-semibold text-slate-100">新建项目</h2>
-            <p className="mt-2 text-sm text-slate-400">填写基础信息后将自动保存风格并跳转至编辑器。</p>
-            <form className="mt-6 space-y-4" onSubmit={handleCreateSubmit}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  项目名称
-                </label>
-                <input
-                  type="text"
-                  value={createForm.name}
-                  onChange={(event) => updateCreateField('name', event.target.value)}
-                  placeholder="请输入项目名称"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                />
+                <h2 className="text-lg font-semibold text-slate-100">风格设定</h2>
+                <p className="mt-1 text-sm text-slate-400">选择项目并调整默认风格，生成章节时将自动应用。</p>
               </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    题材
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.genre}
-                    onChange={(event) => updateCreateField('genre', event.target.value)}
-                    placeholder="如：科幻冒险"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
+              {selectedProject ? (
+                <div className="rounded-full border border-slate-800/80 px-3 py-1 text-xs text-slate-400">
+                  当前项目：<span className="text-slate-100">{selectedProject.name}</span>
+                </div>
+              ) : null}
+            </div>
+            <form className="mt-6 space-y-5" onSubmit={handleStyleSubmit}>
+              {selectedProjectId ? (
+                <div className="space-y-5">
+                  {styleQuery.isFetching && !styleQuery.isSuccess ? (
+                    <p className="text-xs text-slate-500">正在载入风格设定…</p>
+                  ) : null}
+                  {styleQuery.error ? (
+                    <p className="text-xs text-rose-400">加载风格失败，请稍后重试。</p>
+                  ) : null}
+                  <StyleFormFields
+                    form={styleForm}
+                    disabled={!selectedProjectId || styleQuery.isFetching || updateStyleMutation.isPending}
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    文风
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.tone}
-                    onChange={(event) => updateCreateField('tone', event.target.value)}
-                    placeholder="如：热血、励志"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    节奏
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.pacing}
-                    onChange={(event) => updateCreateField('pacing', event.target.value)}
-                    placeholder="如：快节奏、慢热"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    叙述视角
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.pov}
-                    onChange={(event) => updateCreateField('pov', event.target.value)}
-                    placeholder="如：第一人称"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  />
-                </div>
+              ) : (
+                <p className="text-sm text-slate-500">请选择项目后即可查看并调整风格设定。</p>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-slate-500">
+                  风格设定将作为章节生成的默认提示，可在编辑器中再次调整风格强度。
+                </p>
+                <button
+                  type="submit"
+                  disabled={!selectedProjectId || updateStyleMutation.isPending}
+                  className="inline-flex items-center justify-center rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700"
+                >
+                  {updateStyleMutation.isPending ? '保存中…' : '保存风格设定'}
+                </button>
               </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    作家模仿（可选）
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.voice}
-                    onChange={(event) => updateCreateField('voice', event.target.value)}
-                    placeholder="如：模仿刘慈欣"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    目标语言
-                  </label>
-                  <input
-                    type="text"
-                    value={createForm.language}
-                    onChange={(event) => updateCreateField('language', event.target.value)}
-                    placeholder="默认中文"
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isCreating}
-                className="w-full rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700"
-              >
-                {isCreating ? '创建中…' : '创建项目并进入编辑器'}
-              </button>
             </form>
           </div>
         </section>
-
-        <section className="rounded-3xl border border-slate-900/70 bg-slate-950/60 p-6 shadow-xl">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-100">风格设定</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                选择一个项目后更新风格参数，保存后将在生成时自动应用。
-              </p>
-            </div>
-            {activeProject ? (
-              <div className="rounded-full border border-slate-800/80 px-3 py-1 text-xs text-slate-400">
-                当前项目：<span className="text-slate-100">{activeProject.name}</span>
-              </div>
-            ) : null}
-          </div>
-
-          <form className="mt-6 space-y-4" onSubmit={handleStyleSubmit}>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  题材
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.genre}
-                  onChange={(event) => updateStyleField('genre', event.target.value)}
-                  placeholder="请输入题材"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  文风
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.tone}
-                  onChange={(event) => updateStyleField('tone', event.target.value)}
-                  placeholder="请输入文风"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  节奏
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.pacing}
-                  onChange={(event) => updateStyleField('pacing', event.target.value)}
-                  placeholder="请输入节奏"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  叙述视角
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.pov}
-                  onChange={(event) => updateStyleField('pov', event.target.value)}
-                  placeholder="请输入叙述视角"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  作家模仿（可选）
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.voice}
-                  onChange={(event) => updateStyleField('voice', event.target.value)}
-                  placeholder="可以为空"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                  目标语言
-                </label>
-                <input
-                  type="text"
-                  value={styleForm.language}
-                  onChange={(event) => updateStyleField('language', event.target.value)}
-                  placeholder="默认中文"
-                  className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
-                  disabled={!activeProjectId}
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-xs text-slate-500">
-                风格参数将作为生成请求的默认输入，可在章节侧边栏中调整风格强度。
-              </p>
-              <button
-                type="submit"
-                disabled={!activeProjectId || saveStyleMutation.isPending}
-                className="inline-flex items-center justify-center rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700"
-              >
-                {saveStyleMutation.isPending ? '保存中…' : '保存风格设定'}
-              </button>
-            </div>
-          </form>
-        </section>
       </main>
+
+      {renderCreateModal()}
     </div>
   );
 };
