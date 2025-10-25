@@ -23,6 +23,12 @@ export interface PromptMemoryFragment {
   type?: string;
   tags?: string[];
   strength?: string;
+  conflict?: boolean;
+  conflictNotes?: string[];
+  characterIds?: string[];
+  characterStateChange?: string;
+  worldRuleChange?: string;
+  primaryReference?: string;
   [key: string]: unknown;
 }
 
@@ -216,22 +222,43 @@ function buildStyleDirective(style: PromptStyleProfile = {}): string {
 function splitMemoryFragments(memory: PromptMemoryFragment[] = []): {
   taboo: string[];
   continuity: string[];
+  conflicts: Array<{ label: string; current: string; notes: string[]; reference?: string }>;
 } {
   const taboo: string[] = [];
   const continuity: string[] = [];
+  const conflicts: Array<{ label: string; current: string; notes: string[]; reference?: string }> = [];
 
   memory.forEach((fragment, index) => {
     const label = fragment.label || `记忆片段${index + 1}`;
     const content = fragment.content || '';
-    const value = `${label}：${content}`;
-    if (fragment.type === 'taboo') {
-      taboo.push(value);
-    } else {
-      continuity.push(value);
+    const extras: string[] = [];
+    if (fragment.characterStateChange) {
+      extras.push(`人物状态：${fragment.characterStateChange}`);
     }
+    if (fragment.worldRuleChange) {
+      extras.push(`规则变更：${fragment.worldRuleChange}`);
+    }
+    const detail = extras.length ? `${content}（${extras.join('；')}）` : content;
+
+    if (fragment.type === 'taboo') {
+      taboo.push(`${label}：${detail}`);
+      return;
+    }
+
+    if (fragment.conflict) {
+      conflicts.push({
+        label: fragment.primaryReference ? `${label}（来源：${fragment.primaryReference}）` : label,
+        current: detail,
+        notes: Array.isArray(fragment.conflictNotes) ? fragment.conflictNotes : [],
+        reference: fragment.primaryReference,
+      });
+      return;
+    }
+
+    continuity.push(`${label}：${detail}`);
   });
 
-  return { taboo, continuity };
+  return { taboo, continuity, conflicts };
 }
 
 function formatBeatsFromMeta(meta?: OutlineMeta): string | undefined {
@@ -554,27 +581,42 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
     chapterMeta,
   } = options;
 
-  const { taboo, continuity } = splitMemoryFragments(memoryFragments);
+  const { taboo, continuity, conflicts } = splitMemoryFragments(memoryFragments);
   const metaTargetLength = resolveMetaTargetLength(chapterMeta?.targetLength);
   const resolvedTargetLength = metaTargetLength ?? targetLength;
   const parameters = resolveGenerationParameters(styleProfile, continuation);
   const styleSection = buildStyleDirective(styleProfile);
 
-  const sections = [
-    `【角色定位】\n${buildRoleSection({ projectTitle, continuation, chapterMeta, chapterTitle })}`,
-    `【世界观与大纲】\n${buildWorldSection({ synopsis, previousSummary, outlineNode, additionalOutline, chapterMeta })}`,
-    `【人物卡】\n${buildCharacterSection(characters)}`,
-    `【记忆与事实】\n${buildContinuitySection(continuity)}`,
-    `【禁忌表】\n${buildTabooSection(taboo, chapterMeta?.outline, chapterMeta?.continuityChecklist)}`,
-    `【风格控制】\n${styleSection}`,
-    `【输出要求】\n${buildOutputSection({ targetLength: resolvedTargetLength, chapterMeta, instructions, continuation })}`,
-  ];
+  const sections: string[] = [];
+  sections.push(`【角色定位】\n${buildRoleSection({ projectTitle, continuation, chapterMeta, chapterTitle })}`);
+  sections.push(`【世界观与大纲】\n${buildWorldSection({ synopsis, previousSummary, outlineNode, additionalOutline, chapterMeta })}`);
+  sections.push(`【人物卡】\n${buildCharacterSection(characters)}`);
+  sections.push(`【记忆与事实】\n${buildContinuitySection(continuity)}`);
+
+  if (conflicts.length) {
+    const conflictLines = conflicts.map((conflict, index) => {
+      const notes = conflict.notes && conflict.notes.length
+        ? conflict.notes.join('；')
+        : '暂无其他版本，请保持模糊或稍后澄清。';
+      return `${index + 1}. ${conflict.label} —— 最新：${conflict.current}；其他版本：${notes}`;
+    });
+    sections.push(
+      `【记忆冲突】\n遵循以下事实，以最近章节为准；若仍无法确认请保持模糊或推迟明确表述。\n${indentLines(conflictLines)}`
+    );
+  }
+
+  sections.push(`【禁忌表】\n${buildTabooSection(taboo, chapterMeta?.outline, chapterMeta?.continuityChecklist)}`);
+  sections.push(`【风格控制】\n${styleSection}`);
+  sections.push(
+    `【输出要求】\n${buildOutputSection({ targetLength: resolvedTargetLength, chapterMeta, instructions, continuation })}`
+  );
 
   const systemMessage = [
     '你是中文长篇小说的首席主笔，负责把结构化规划转化为沉浸式正文。',
     '必须严格执行给定的节拍、角色与禁忌，不得偏离或自行总结点评。',
     '语言需凝练且具画面感，每个场景都要推动剧情或角色发展。',
     '若遇到模糊信息，可用细节补充但不得自创矛盾设定。',
+    '面对记忆冲突时，请以“记忆冲突”列表中最近章节的事实为准；若仍不确定请保持模糊或等待后续澄清。',
   ].join('\n');
 
   const userMessage = sections.join('\n\n');
@@ -613,7 +655,7 @@ function buildMetaPromptSections(options: ChapterMetaPromptOptions): string {
     instructions,
   } = options;
 
-  const { taboo, continuity } = splitMemoryFragments(memoryFragments);
+  const { taboo, continuity, conflicts } = splitMemoryFragments(memoryFragments);
 
   const constraints: string[] = [
     '1. 仅输出符合 JSON Schema 的对象，禁止添加任何解释文字。',
@@ -668,6 +710,14 @@ function buildMetaPromptSections(options: ChapterMetaPromptOptions): string {
 
   if (continuity.length) {
     sections.push(`【已知事实】\n${buildContinuitySection(continuity)}`);
+  }
+
+  if (conflicts.length) {
+    const conflictLines = conflicts.map((conflict, index) => {
+      const notes = conflict.notes.length ? conflict.notes.join('；') : '暂无其他版本，规划时需保持模糊。';
+      return `${index + 1}. ${conflict.label} —— 最新：${conflict.current}；其他版本：${notes}`;
+    });
+    sections.push(`【潜在冲突】\n请记录以下可能矛盾的设定，以最近描述为准，未确认前保持模糊。\n${indentLines(conflictLines)}`);
   }
 
   if (taboo.length) {

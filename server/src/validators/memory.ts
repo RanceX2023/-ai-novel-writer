@@ -20,6 +20,10 @@ export const memoryItemSchema = z.object({
   refs: z.array(memoryRefSchema).max(8).optional(),
   category: z.string().trim().min(1).max(80).optional(),
   metadata: z.record(z.any()).optional(),
+  characterIds: z.array(z.string().trim().regex(mongoIdRegex)).max(8).optional(),
+  characterStateChange: z.string().trim().min(1).max(240).optional(),
+  worldRuleChange: z.string().trim().min(1).max(240).optional(),
+  updatedAt: z.string().trim().optional(),
 });
 
 export const memorySyncSchema = z.object({
