@@ -9,7 +9,7 @@ import StyleProfileModel, { StyleProfileAttributes, StyleProfileDocument } from 
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
-import { PromptMemoryFragment, PromptStyleProfile } from '../utils/promptTemplates';
+import { PromptMemoryFragment, PromptOutlineNode, PromptStyleProfile } from '../utils/promptTemplates';
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const TARGET_PARAGRAPH_TOKEN_ESTIMATE = 80;
@@ -42,6 +42,8 @@ class GenerationService {
 
   private jobControllers: Map<string, AbortController>;
 
+  private cancelledJobReasons: Map<string, string>;
+
   private costPer1KTokens: number;
 
   constructor({ openAIService, memoryService }: { openAIService?: OpenAIService; memoryService?: MemoryService } = {}) {
@@ -49,6 +51,7 @@ class GenerationService {
     this.memoryService = memoryService;
     this.streamSubscriptions = new Map();
     this.jobControllers = new Map();
+    this.cancelledJobReasons = new Map();
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
   }
 
@@ -72,8 +75,25 @@ class GenerationService {
       subscribers?.delete(subscription);
       if (!subscribers || subscribers.size === 0) {
         this.streamSubscriptions.delete(jobId);
+        if (this.jobControllers.has(jobId)) {
+          this.cancelJob(jobId, 'Client disconnected from stream');
+        }
       }
     });
+  }
+
+  cancelJob(jobId: string, reason?: string): void {
+    const controller = this.jobControllers.get(jobId);
+    if (!controller || controller.signal.aborted) {
+      return;
+    }
+
+    const message = reason ?? 'Generation job cancelled by client';
+    if (!this.cancelledJobReasons.has(jobId)) {
+      this.cancelledJobReasons.set(jobId, message);
+    }
+
+    controller.abort();
   }
 
   async createChapterGenerationJob(
@@ -286,14 +306,33 @@ class GenerationService {
           durationMs: Date.now() - startedAt,
         });
       } catch (error) {
-        await this.failJob(job, error);
+        if (this.cancelledJobReasons.has(jobId)) {
+          await this.markJobCancelled(job, this.cancelledJobReasons.get(jobId));
+        } else {
+          await this.failJob(job, error);
+        }
       } finally {
-        this.finish(jobId);
         this.jobControllers.delete(jobId);
+        this.cancelledJobReasons.delete(jobId);
+        this.finish(jobId);
       }
     })().catch((error) => {
       console.error('[GenerationService] Unexpected job execution error', error);
       this.jobControllers.delete(jobId);
+      this.cancelledJobReasons.delete(jobId);
+    });
+  }
+
+  private async markJobCancelled(job: GenerationJobDocument, reason?: string): Promise<void> {
+    job.status = 'cancelled';
+    job.error = reason ? { message: reason } : null;
+    job.completedAt = new Date();
+    await job.save();
+
+    this.emit(job.id, 'done', {
+      jobId: job.id,
+      status: 'cancelled',
+      reason,
     });
   }
 
