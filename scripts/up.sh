@@ -17,8 +17,7 @@ ensure_env_file() {
   fi
 }
 
-ensure_env_file "$ROOT_DIR/client/.env" "$ROOT_DIR/client/.env.example"
-ensure_env_file "$ROOT_DIR/server/.env" "$ROOT_DIR/server/.env.example"
+ensure_env_file "$ROOT_DIR/.env" "$ROOT_DIR/.env.example"
 
 COMPOSE_ARGS=(-f docker-compose.yml)
 DOCKER_ARGS=()

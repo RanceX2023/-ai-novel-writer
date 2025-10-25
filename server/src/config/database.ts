@@ -7,7 +7,10 @@ export async function connectDatabase(uri?: string): Promise<typeof mongoose> {
     return cachedConnection;
   }
 
-  const mongoUri = uri || process.env.MONGO_URI || 'mongodb://localhost:27017/ai_novel_writer';
+  const mongoUri = uri
+    || process.env.MONGO_URI
+    || process.env.MONGODB_URI
+    || 'mongodb://localhost:27017/ai_novel_writer';
 
   mongoose.set('strictQuery', false);
 

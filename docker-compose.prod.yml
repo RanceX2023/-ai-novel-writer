@@ -1,19 +1,26 @@
 version: "3.9"
 
 services:
-  client:
-    environment:
-      NODE_ENV: production
-    command: ["npm", "run", "start"]
-    volumes: []
+  mongo:
     restart: always
 
   server:
+    build:
+      target: production
     environment:
       NODE_ENV: production
-    command: ["npm", "run", "start"]
     volumes: []
     restart: always
 
-  mongo:
+  client:
+    build:
+      target: production
+    environment:
+      NODE_ENV: production
+    ports:
+      - "${CLIENT_PORT:-5173}:80"
+    volumes: []
+    depends_on:
+      server:
+        condition: service_healthy
     restart: always
