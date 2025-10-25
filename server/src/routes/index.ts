@@ -23,7 +23,7 @@ import {
   updateCharacter,
 } from '../controllers/characterController';
 import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
-import { streamJob } from '../controllers/streamController';
+import { cancelStreamJob, streamJob } from '../controllers/streamController';
 import {
   createPlotArc,
   createPlotPoint,
@@ -150,5 +150,6 @@ router.post(
 );
 
 router.get('/stream/:jobId', streamJob);
+router.post('/stream/:jobId/cancel', cancelStreamJob);
 
 export default router;

@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { API_BASE, fetchJson } from '../utils/api';
+import { API_BASE, fetchJson, HttpError } from '../utils/api';
+import { cancelStreamJob } from '../api/stream';
 import OutlinePanel from '../components/outline/OutlinePanel';
 import { useToast } from '../components/ui/ToastProvider';
 
@@ -82,6 +83,8 @@ type StreamMode = 'generate' | 'continue';
 
 type StreamStatus = 'idle' | 'pending' | 'streaming' | 'completed' | 'error';
 
+type ConnectionState = 'idle' | 'connecting' | 'connected' | 'retrying' | 'disconnected';
+
 interface StreamState {
   mode: StreamMode | null;
   status: StreamStatus;
@@ -90,7 +93,15 @@ interface StreamState {
   tokens: number;
   durationMs?: number;
   error?: string;
+  requestId?: string;
 }
+
+type AutoSaveState = {
+  status: 'idle' | 'saving' | 'success' | 'error';
+  timestamp?: number;
+  requestId?: string;
+  message?: string;
+};
 
 const modelOptions = [
   { value: 'gpt-4o-mini', label: 'GPT-4o mini' },
@@ -131,6 +142,12 @@ function targetLengthPayload(value: number, unit: 'characters' | 'paragraphs') {
 }
 
 const STREAM_PLACEHOLDER = '点击「生成章节」或「续写」即可在此处看到 AI 的实时输出。';
+const MAX_RECONNECT_ATTEMPTS = 5;
+const AUTO_SAVE_INTERVAL = 2600;
+const LOCAL_DRAFT_DEBOUNCE = 1000;
+
+const getDraftStorageKey = (projectId?: string | null, chapterId?: string | null) =>
+  projectId && chapterId ? `novel-draft:${projectId}:${chapterId}` : null;
 
 const ProjectEditorPage = () => {
   const { projectId } = useParams<{ projectId: string }>();
@@ -153,6 +170,11 @@ const ProjectEditorPage = () => {
     progress: 0,
     tokens: 0,
   });
+  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [autoSaveState, setAutoSaveState] = useState<AutoSaveState>({ status: 'idle' });
+  const [unsavedChanges, setUnsavedChanges] = useState(false);
+  const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   const outputRef = useRef<HTMLDivElement | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -160,6 +182,17 @@ const ProjectEditorPage = () => {
   const baseContentRef = useRef<string>('');
   const startTimeRef = useRef<number | null>(null);
   const currentVersionRef = useRef<number | null>(null);
+  const pendingTokensRef = useRef<string[]>([]);
+  const rafRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const isManualCancelRef = useRef(false);
+  const activeJobRef = useRef<{ jobId: string; mode: StreamMode } | null>(null);
+  const lastSavedContentRef = useRef<string>('');
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const localDraftTimerRef = useRef<number | null>(null);
+  const restoredDraftKeyRef = useRef<string | null>(null);
+  const streamModeRef = useRef<StreamMode | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ['project-editor-context', projectId],
@@ -199,6 +232,10 @@ const ProjectEditorPage = () => {
   });
 
   useEffect(() => {
+    streamModeRef.current = streamState.mode;
+  }, [streamState.mode]);
+
+  useEffect(() => {
     if (!memoryQuery.data) {
       return;
     }
@@ -235,10 +272,16 @@ const ProjectEditorPage = () => {
   }, [chaptersQuery.data]);
 
   useEffect(() => {
-    if (chapterDetailQuery.data && streamState.status !== 'streaming') {
-      setDraftContent(chapterDetailQuery.data.content ?? '');
-      currentVersionRef.current = chapterDetailQuery.data.version ?? null;
+    if (!chapterDetailQuery.data || streamState.status === 'streaming') {
+      return;
     }
+
+    const remoteContent = chapterDetailQuery.data.content ?? '';
+    setDraftContent(remoteContent);
+    currentVersionRef.current = chapterDetailQuery.data.version ?? null;
+    lastSavedContentRef.current = remoteContent;
+    restoredDraftKeyRef.current = null;
+    setAutoSaveState((prev) => (prev.status === 'error' ? prev : { status: 'idle', timestamp: prev.timestamp }));
   }, [chapterDetailQuery.data, streamState.status]);
 
   useEffect(() => {
@@ -256,24 +299,56 @@ const ProjectEditorPage = () => {
     }
   }, [chaptersQuery.data, pendingChapterSelect]);
 
-  useEffect(() => {
-    if (!draftContent) {
+  const scrollToBottom = useCallback((smooth = true) => {
+    const node = outputRef.current;
+    if (!node) {
       return;
     }
+    const behavior: ScrollBehavior = smooth ? 'smooth' : 'auto';
+    requestAnimationFrame(() => {
+      node.scrollTo({ top: node.scrollHeight, behavior });
+    });
+  }, []);
+
+  useEffect(() => {
     const node = outputRef.current;
-    if (node) {
-      node.scrollTop = node.scrollHeight;
+    if (!node) {
+      return;
     }
-  }, [draftContent]);
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = node;
+      const atBottom = scrollHeight - (scrollTop + clientHeight) < 160;
+      setIsPinnedToBottom(atBottom);
+    };
+
+    node.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
+
+    return () => {
+      node.removeEventListener('scroll', handleScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isPinnedToBottom) {
+      return;
+    }
+    scrollToBottom(true);
+  }, [draftContent, isPinnedToBottom, scrollToBottom]);
+
+  useEffect(() => {
+    if (streamState.status === 'streaming') {
+      setIsPinnedToBottom(true);
+      scrollToBottom(false);
+    }
+  }, [streamState.status, scrollToBottom]);
 
   useEffect(() => {
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
+      cleanupStream();
     };
-  }, []);
+  }, [cleanupStream]);
 
   const toggleMemory = useCallback((id: string) => {
     setSelectedMemoryIds((prev) => {
@@ -287,149 +362,356 @@ const ProjectEditorPage = () => {
     });
   }, []);
 
+  const cancelPendingFlush = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  const flushPendingTokens = useCallback(() => {
+    if (!pendingTokensRef.current.length) {
+      return;
+    }
+
+    const tokens: string[] = [];
+    let nonWhitespaceCount = 0;
+    const tokensPerFrame = 28;
+
+    while (pendingTokensRef.current.length && nonWhitespaceCount < tokensPerFrame) {
+      const token = pendingTokensRef.current.shift()!;
+      tokens.push(token);
+      if (!/^\s+$/.test(token)) {
+        nonWhitespaceCount += 1;
+      }
+    }
+
+    if (!tokens.length) {
+      return;
+    }
+
+    streamBufferRef.current += tokens.join('');
+    const base = streamModeRef.current === 'continue' ? baseContentRef.current : '';
+    const nextContent = `${base}${streamBufferRef.current}`;
+    setDraftContent(nextContent);
+  }, [setDraftContent]);
+
+  const scheduleFlush = useCallback(() => {
+    if (rafRef.current !== null) {
+      return;
+    }
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      flushPendingTokens();
+      if (pendingTokensRef.current.length > 0) {
+        scheduleFlush();
+      }
+    });
+  }, [flushPendingTokens]);
+
+  const resetStreamBuffers = useCallback(() => {
+    pendingTokensRef.current = [];
+    streamBufferRef.current = '';
+    cancelPendingFlush();
+  }, [cancelPendingFlush]);
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const parseEventData = <T,>(raw: string): T | null => {
+    if (!raw) {
+      return null;
+    }
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  };
+
+  const connectToStream = (
+    jobId: string,
+    mode: StreamMode,
+    options?: { isReconnect?: boolean }
+  ) => {
+    if (!jobId) {
+      return;
+    }
+
+    clearReconnectTimer();
+
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    const isReconnect = Boolean(options?.isReconnect);
+    if (!isReconnect) {
+      reconnectAttemptRef.current = 0;
+    }
+
+    const source = new EventSource(`${API_BASE}/api/stream/${jobId}`, { withCredentials: true });
+    eventSourceRef.current = source;
+    setConnectionState(isReconnect ? 'retrying' : 'connecting');
+
+    source.onopen = () => {
+      clearReconnectTimer();
+      reconnectAttemptRef.current = 0;
+      setConnectionState('connected');
+    };
+
+    source.addEventListener('meta', (event) => {
+      const payload = parseEventData<{ requestId?: string }>(event.data ?? '');
+      if (payload?.requestId) {
+        setStreamState((prev) => ({ ...prev, requestId: payload.requestId }));
+      }
+    });
+
+    source.addEventListener('start', (event) => {
+      const payload = parseEventData<{ progress?: number; tokensGenerated?: number; requestId?: string }>(event.data ?? '');
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'streaming',
+        progress: payload?.progress !== undefined ? Math.min(Math.max(payload.progress, 0), 100) : prev.progress,
+        tokens: payload?.tokensGenerated ?? prev.tokens,
+        requestId: payload?.requestId ?? prev.requestId,
+        error: undefined,
+      }));
+    });
+
+    source.addEventListener('progress', (event) => {
+      const payload = parseEventData<{ progress?: number; tokensGenerated?: number; requestId?: string }>(event.data ?? '');
+      setStreamState((prev) => ({
+        ...prev,
+        progress: payload?.progress !== undefined ? Math.min(Math.max(payload.progress, 0), 100) : prev.progress,
+        tokens: payload?.tokensGenerated ?? prev.tokens,
+        requestId: payload?.requestId ?? prev.requestId,
+      }));
+    });
+
+    source.addEventListener('delta', (event) => {
+      const payload = parseEventData<{ text?: string; requestId?: string }>(event.data ?? '');
+      if (payload?.requestId) {
+        setStreamState((prev) => ({ ...prev, requestId: payload.requestId }));
+      }
+      const textChunk = typeof payload?.text === 'string' && payload.text ? payload.text : event.data;
+      if (textChunk) {
+        const pieces = textChunk.match(/[\s]+|[^\s]+/g) ?? [textChunk];
+        pendingTokensRef.current.push(...pieces);
+        scheduleFlush();
+      }
+    });
+
+    source.addEventListener('error', (event) => {
+      const payload = parseEventData<{ message?: string; code?: string; requestId?: string }>(event.data ?? '');
+      const message = payload?.message ?? '生成过程中出现异常，请稍后重试。';
+      const requestIdFromEvent = payload?.requestId;
+      clearReconnectTimer();
+      cancelPendingFlush();
+      while (pendingTokensRef.current.length) {
+        flushPendingTokens();
+      }
+      setConnectionState('disconnected');
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: message,
+        requestId: requestIdFromEvent ?? prev.requestId,
+      }));
+      const description = requestIdFromEvent ? `${message}（请求 ID：${requestIdFromEvent}）` : message;
+      toast({ title: '生成失败', description, variant: 'error' });
+      source.close();
+      eventSourceRef.current = null;
+      activeJobRef.current = null;
+      resetStreamBuffers();
+    });
+
+    source.addEventListener('done', (event) => {
+      const payload = parseEventData<{ status?: string; durationMs?: number; tokensGenerated?: number; requestId?: string }>(event.data ?? '');
+      clearReconnectTimer();
+      cancelPendingFlush();
+      while (pendingTokensRef.current.length) {
+        flushPendingTokens();
+      }
+      const durationMs = payload?.durationMs ?? (startTimeRef.current ? Date.now() - startTimeRef.current : undefined);
+      startTimeRef.current = null;
+      const status = payload?.status ?? 'completed';
+      const requestIdFromEvent = payload?.requestId;
+      const isFailure = status === 'failed';
+      setStreamState((prev) => ({
+        ...prev,
+        status: isFailure ? 'error' : 'completed',
+        durationMs: durationMs ?? prev.durationMs,
+        tokens: payload?.tokensGenerated ?? prev.tokens,
+        progress: 100,
+        requestId: requestIdFromEvent ?? prev.requestId,
+        error: isFailure ? prev.error ?? '生成任务已失败，请重试。' : undefined,
+      }));
+      setConnectionState('idle');
+      if (isFailure) {
+        const description = requestIdFromEvent
+          ? `生成任务失败，请重试。（请求 ID：${requestIdFromEvent}）`
+          : '生成任务失败，请重试。';
+        toast({ title: '生成中断', description, variant: 'error' });
+      }
+      eventSourceRef.current = null;
+      reconnectAttemptRef.current = 0;
+      resetStreamBuffers();
+
+      if (mode === 'generate') {
+        setPendingChapterSelect('new');
+        chaptersQuery.refetch();
+      } else if (selectedChapterId) {
+        queryClient.invalidateQueries({ queryKey: ['chapter-detail', projectId, selectedChapterId] });
+        queryClient.invalidateQueries({ queryKey: ['chapter-versions', projectId, selectedChapterId] });
+        queryClient.invalidateQueries({ queryKey: ['chapters', projectId] });
+      }
+
+      activeJobRef.current = null;
+    });
+
+    source.addEventListener('heartbeat', () => {});
+
+    source.onerror = () => {
+      if (isManualCancelRef.current) {
+        return;
+      }
+
+      source.close();
+      eventSourceRef.current = null;
+      clearReconnectTimer();
+
+      reconnectAttemptRef.current += 1;
+      const attempt = reconnectAttemptRef.current;
+      if (attempt > MAX_RECONNECT_ATTEMPTS) {
+        setConnectionState('disconnected');
+        setStreamState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: prev.error ?? '流式连接已断开，请手动重新连接。',
+        }));
+        toast({
+          title: '连接中断',
+          description: '多次重试后仍未恢复流式连接，请点击「重新连接」。',
+          variant: 'error',
+        });
+        return;
+      }
+
+      setConnectionState('retrying');
+      const delay = Math.min(10_000, 1000 * 2 ** (attempt - 1));
+      reconnectTimerRef.current = window.setTimeout(() => {
+        connectToStream(jobId, mode, { isReconnect: true });
+      }, delay);
+    };
+  };
+
   const beginStream = useCallback(
     (jobId: string, mode: StreamMode) => {
       if (!jobId) {
         return;
       }
+
+      activeJobRef.current = { jobId, mode };
+      isManualCancelRef.current = false;
+      clearReconnectTimer();
+      resetStreamBuffers();
+      startTimeRef.current = Date.now();
+
+      if (mode === 'generate') {
+        baseContentRef.current = '';
+        setDraftContent('');
+      }
+
+      setStreamState({
+        mode,
+        status: 'streaming',
+        jobId,
+        progress: 0,
+        tokens: 0,
+        error: undefined,
+        requestId: undefined,
+        durationMs: undefined,
+      });
+      setConnectionState('connecting');
+      connectToStream(jobId, mode);
+    },
+    [clearReconnectTimer, connectToStream, resetStreamBuffers]
+  );
+
+  const cleanupStream = useCallback(
+    (options?: { resetState?: boolean }) => {
+      clearReconnectTimer();
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
-
-      streamBufferRef.current = '';
-      startTimeRef.current = Date.now();
-      setStreamState({ mode, status: 'streaming', jobId, progress: 0, tokens: 0 });
-
-      const streamUrl = `${API_BASE}/api/stream/${jobId}`;
-      const source = new EventSource(streamUrl, { withCredentials: true });
-      eventSourceRef.current = source;
-
-      source.addEventListener('start', (event) => {
-        let payload: { status?: string; progress?: number; tokensGenerated?: number } = {};
-        if (event.data) {
-          try {
-            payload = JSON.parse(event.data);
-          } catch {
-            payload = {};
-          }
-        }
-        let nextProgress: number | undefined;
-        if (payload.progress !== undefined) {
-          const numeric = Number(payload.progress);
-          if (!Number.isNaN(numeric)) {
-            nextProgress = Math.min(Math.max(numeric, 0), 100);
-          }
-        }
-        setStreamState((prev) => ({
-          ...prev,
-          status: 'streaming',
-          progress: nextProgress ?? prev.progress,
-          tokens: typeof payload.tokensGenerated === 'number' ? payload.tokensGenerated : prev.tokens,
-          error: undefined,
-        }));
-      });
-
-      source.addEventListener('delta', (event) => {
-        try {
-          const data = JSON.parse(event.data) as { text?: string };
-          if (data.text) {
-            streamBufferRef.current += data.text;
-          }
-        } catch (error) {
-          if (event.data) {
-            streamBufferRef.current += event.data;
-          }
-        }
-        setDraftContent((mode === 'continue' ? baseContentRef.current : '') + streamBufferRef.current);
-      });
-
-      source.addEventListener('progress', (event) => {
-        try {
-          const data = JSON.parse(event.data) as { progress?: number; tokensGenerated?: number };
-          setStreamState((prev) => ({
-            ...prev,
-            progress: Math.min(Math.max(data.progress ?? prev.progress, 0), 100),
-            tokens: data.tokensGenerated ?? prev.tokens,
-          }));
-        } catch {
-          // ignore malformed progress payload
-        }
-      });
-
-      source.addEventListener('error', (event) => {
-        let message = '生成过程中出现异常，请稍后重试。';
-        if (event.data) {
-          try {
-            const data = JSON.parse(event.data) as { message?: string };
-            if (data.message) {
-              message = data.message;
-            }
-          } catch {
-            message = event.data;
-          }
-        }
-        setStreamState((prev) => ({ ...prev, status: 'error', error: message }));
-        toast({ title: '生成失败', description: message, variant: 'error' });
-        source.close();
-        eventSourceRef.current = null;
-      });
-
-      source.addEventListener('done', (event) => {
-        let durationMs = startTimeRef.current ? Date.now() - startTimeRef.current : undefined;
-        let tokensGenerated: number | undefined;
-        if (event.data) {
-          try {
-            const data = JSON.parse(event.data) as { durationMs?: number; tokensGenerated?: number };
-            if (typeof data.durationMs === 'number') {
-              durationMs = data.durationMs;
-            }
-            if (typeof data.tokensGenerated === 'number') {
-              tokensGenerated = data.tokensGenerated;
-            }
-          } catch {}
-        }
-        setStreamState((prev) => ({
-          ...prev,
-          status: 'completed',
-          durationMs,
-          tokens: tokensGenerated ?? prev.tokens,
-          progress: 100,
-        }));
-        source.close();
-        eventSourceRef.current = null;
-        streamBufferRef.current = '';
-        baseContentRef.current = '';
-        startTimeRef.current = null;
-        if (mode === 'generate') {
-          setPendingChapterSelect('new');
-          chaptersQuery.refetch();
-        } else if (selectedChapterId) {
-          queryClient.invalidateQueries({ queryKey: ['chapter-detail', projectId, selectedChapterId] });
-          queryClient.invalidateQueries({ queryKey: ['chapter-versions', projectId, selectedChapterId] });
-          queryClient.invalidateQueries({ queryKey: ['chapters', projectId] });
-        }
-      });
+      cancelPendingFlush();
+      resetStreamBuffers();
+      startTimeRef.current = null;
+      activeJobRef.current = null;
+      if (options?.resetState !== false) {
+        setStreamState((prev) => ({ ...prev, status: 'idle', mode: null, jobId: undefined, error: undefined }));
+        setConnectionState('idle');
+      }
     },
-    [chaptersQuery, projectId, queryClient, selectedChapterId, toast]
+    [cancelPendingFlush, clearReconnectTimer, resetStreamBuffers]
   );
 
-  const handleStopStream = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    setStreamState((prev) => ({ ...prev, status: 'idle', mode: null, jobId: undefined }));
-    streamBufferRef.current = '';
-    baseContentRef.current = '';
-    startTimeRef.current = null;
-  }, []);
-
   useEffect(() => {
-    handleStopStream();
+    cleanupStream();
     setDraftContent('');
     setPendingChapterSelect(null);
-  }, [handleStopStream, projectId]);
+  }, [cleanupStream, projectId]);
+
+  const handleCancelStream = useCallback(async () => {
+    const jobId = streamState.jobId;
+    if (!jobId) {
+      cleanupStream();
+      return;
+    }
+
+    isManualCancelRef.current = true;
+    setIsCancelling(true);
+    cleanupStream({ resetState: false });
+    reconnectAttemptRef.current = 0;
+    setStreamState((prev) => ({ ...prev, status: 'idle', mode: null, jobId: undefined }));
+    setConnectionState('disconnected');
+
+    try {
+      const response = await cancelStreamJob(jobId);
+      setConnectionState('idle');
+      toast({ title: '生成已取消', description: response?.message ?? '已停止当前生成任务。', variant: 'success' });
+    } catch (error) {
+      const message = error instanceof HttpError ? error.message : '取消生成失败，请稍后重试。';
+      const requestId = error instanceof HttpError ? error.requestId : undefined;
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: message,
+        requestId: requestId ?? prev.requestId,
+      }));
+      const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+      toast({ title: '取消失败', description, variant: 'error' });
+    } finally {
+      setIsCancelling(false);
+      isManualCancelRef.current = false;
+    }
+  }, [cleanupStream, streamState.jobId, toast]);
+
+  const handleReconnect = useCallback(() => {
+    const job = activeJobRef.current ?? (streamState.jobId && streamState.mode ? { jobId: streamState.jobId, mode: streamState.mode } : null);
+    if (!job) {
+      return;
+    }
+    reconnectAttemptRef.current = 0;
+    setConnectionState('connecting');
+    connectToStream(job.jobId, job.mode, { isReconnect: true });
+  }, [connectToStream, streamState.jobId, streamState.mode]);
 
   const buildCommonPayload = useCallback(() => {
     const memoryIds = Array.from(selectedMemoryIds);
@@ -453,22 +735,35 @@ const ProjectEditorPage = () => {
         body: JSON.stringify(payload),
       }),
     onMutate: () => {
-      streamBufferRef.current = '';
+      clearReconnectTimer();
+      resetStreamBuffers();
       baseContentRef.current = '';
       setDraftContent('');
-      setStreamState({ mode: 'generate', status: 'pending', progress: 0, tokens: 0 });
+      startTimeRef.current = null;
+      setStreamState({ mode: 'generate', status: 'pending', progress: 0, tokens: 0, error: undefined, requestId: undefined });
+      setConnectionState('connecting');
     },
     onSuccess: (data) => {
       if (!data.jobId) {
         setStreamState((prev) => ({ ...prev, status: 'error', error: '未返回任务 ID' }));
         toast({ title: '任务启动失败', description: '未返回有效的任务 ID。', variant: 'error' });
+        setConnectionState('disconnected');
         return;
       }
       beginStream(data.jobId, 'generate');
     },
     onError: (error: Error) => {
-      setStreamState((prev) => ({ ...prev, status: 'error', error: error.message }));
-      toast({ title: '生成章节失败', description: error.message, variant: 'error' });
+      const message = error instanceof HttpError ? error.message : error.message;
+      const requestId = error instanceof HttpError ? error.requestId : undefined;
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: message,
+        requestId: requestId ?? prev.requestId,
+      }));
+      setConnectionState('disconnected');
+      const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+      toast({ title: '生成章节失败', description, variant: 'error' });
     },
   });
 
@@ -479,41 +774,64 @@ const ProjectEditorPage = () => {
         body: JSON.stringify(payload),
       }),
     onMutate: () => {
-      streamBufferRef.current = '';
+      clearReconnectTimer();
+      resetStreamBuffers();
       baseContentRef.current = draftContent;
-      setStreamState({ mode: 'continue', status: 'pending', progress: 0, tokens: 0 });
+      startTimeRef.current = null;
+      setStreamState({ mode: 'continue', status: 'pending', progress: 0, tokens: 0, error: undefined, requestId: undefined });
+      setConnectionState('connecting');
     },
     onSuccess: (data) => {
       if (!data.jobId) {
         setStreamState((prev) => ({ ...prev, status: 'error', error: '未返回任务 ID' }));
         toast({ title: '任务启动失败', description: '未返回有效的任务 ID。', variant: 'error' });
+        setConnectionState('disconnected');
         return;
       }
       beginStream(data.jobId, 'continue');
     },
     onError: (error: Error) => {
-      setStreamState((prev) => ({ ...prev, status: 'error', error: error.message }));
-      toast({ title: '续写失败', description: error.message, variant: 'error' });
+      const message = error instanceof HttpError ? error.message : error.message;
+      const requestId = error instanceof HttpError ? error.requestId : undefined;
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: message,
+        requestId: requestId ?? prev.requestId,
+      }));
+      setConnectionState('disconnected');
+      const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+      toast({ title: '续写失败', description, variant: 'error' });
     },
   });
 
-  const saveMutation = useMutation({
-    mutationFn: (payload: ChapterUpdatePayload) =>
-      fetchJson<{ chapter: ChapterDetail }>(`/api/projects/${projectId}/chapters/${selectedChapterId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          ...payload,
-          metadata: {
-            ...(payload.metadata ?? {}),
-            source: 'stream-preview',
-            mode: streamState.mode,
-            tokens: streamState.tokens,
-          },
-        }),
+  const updateChapterRequest = (payload: ChapterUpdatePayload) => {
+    if (!projectId || !selectedChapterId) {
+      return Promise.reject(new Error('缺少章节信息，无法保存。'));
+    }
+    return fetchJson<{ chapter: ChapterDetail }>(`/api/projects/${projectId}/chapters/${selectedChapterId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        ...payload,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          source: 'stream-preview',
+          mode: streamState.mode,
+          tokens: streamState.tokens,
+        },
       }),
+    });
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: updateChapterRequest,
     onSuccess: (data) => {
       toast({ title: '章节已保存', description: '内容已写入最新版本。', variant: 'success' });
+      const savedContent = data.chapter.content ?? draftContent;
+      lastSavedContentRef.current = savedContent;
       currentVersionRef.current = data.chapter.version ?? currentVersionRef.current;
+      setAutoSaveState({ status: 'success', timestamp: Date.now() });
+      setUnsavedChanges(false);
       queryClient.invalidateQueries({ queryKey: ['chapters', projectId] });
       if (selectedChapterId) {
         queryClient.invalidateQueries({ queryKey: ['chapter-detail', projectId, selectedChapterId] });
@@ -521,9 +839,199 @@ const ProjectEditorPage = () => {
       }
     },
     onError: (error: Error) => {
-      toast({ title: '保存失败', description: error.message, variant: 'error' });
+      const message = error instanceof HttpError ? error.message : error.message;
+      const requestId = error instanceof HttpError ? error.requestId : undefined;
+      const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+      toast({ title: '保存失败', description, variant: 'error' });
+      setAutoSaveState({ status: 'error', message, requestId });
     },
   });
+
+  const autoSaveMutation = useMutation({
+    mutationFn: updateChapterRequest,
+    onMutate: () => {
+      setAutoSaveState({ status: 'saving' });
+    },
+    onSuccess: (data) => {
+      const savedContent = data.chapter.content ?? draftContent;
+      lastSavedContentRef.current = savedContent;
+      currentVersionRef.current = data.chapter.version ?? currentVersionRef.current;
+      setAutoSaveState({ status: 'success', timestamp: Date.now() });
+      setUnsavedChanges(false);
+    },
+    onError: (error: Error) => {
+      const message = error instanceof HttpError ? error.message : error.message;
+      const requestId = error instanceof HttpError ? error.requestId : undefined;
+      if (autoSaveState.status !== 'error' || autoSaveState.message !== message || autoSaveState.requestId !== requestId) {
+        const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+        toast({ title: '自动保存失败', description, variant: 'error' });
+      }
+      setAutoSaveState({ status: 'error', message, requestId });
+    },
+  });
+
+  useEffect(() => {
+    const savedContent = lastSavedContentRef.current;
+    const hasUnsaved = draftContent !== savedContent;
+    setUnsavedChanges(hasUnsaved);
+    if (hasUnsaved && autoSaveState.status === 'success') {
+      setAutoSaveState((prev) => ({ status: 'idle', timestamp: prev.timestamp, requestId: prev.requestId }));
+    }
+    if (!hasUnsaved && autoSaveState.status === 'error') {
+      setAutoSaveState((prev) => ({ status: 'idle', timestamp: prev.timestamp, requestId: prev.requestId }));
+    }
+  }, [draftContent, autoSaveState]);
+
+  useEffect(() => {
+    if (!projectId || !selectedChapterId) {
+      return;
+    }
+    if (!unsavedChanges) {
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      return;
+    }
+    if (streamState.status === 'streaming' || streamState.status === 'pending') {
+      return;
+    }
+    if (autoSaveMutation.isPending) {
+      return;
+    }
+
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      autoSaveMutation.mutate({
+        content: draftContent,
+        baseVersion: currentVersionRef.current ?? undefined,
+      });
+      autoSaveTimerRef.current = null;
+    }, AUTO_SAVE_INTERVAL);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [draftContent, projectId, selectedChapterId, streamState.status, autoSaveMutation, unsavedChanges]);
+
+  useEffect(() => {
+    if (!projectId || !selectedChapterId) {
+      return;
+    }
+    const key = getDraftStorageKey(projectId, selectedChapterId);
+    if (!key) {
+      return;
+    }
+
+    if (!unsavedChanges) {
+      localStorage.removeItem(key);
+      return;
+    }
+
+    if (localDraftTimerRef.current) {
+      window.clearTimeout(localDraftTimerRef.current);
+    }
+
+    localDraftTimerRef.current = window.setTimeout(() => {
+      const payload = {
+        content: draftContent,
+        updatedAt: Date.now(),
+        version: currentVersionRef.current ?? undefined,
+      };
+      try {
+        localStorage.setItem(key, JSON.stringify(payload));
+      } catch {
+        // ignore storage quota errors
+      }
+      localDraftTimerRef.current = null;
+    }, LOCAL_DRAFT_DEBOUNCE);
+
+    return () => {
+      if (localDraftTimerRef.current) {
+        window.clearTimeout(localDraftTimerRef.current);
+        localDraftTimerRef.current = null;
+      }
+    };
+  }, [draftContent, projectId, selectedChapterId, unsavedChanges]);
+
+  useEffect(() => {
+    if (!projectId || !selectedChapterId || !chapterDetailQuery.data || streamState.status === 'streaming') {
+      return;
+    }
+    const key = getDraftStorageKey(projectId, selectedChapterId);
+    if (!key || restoredDraftKeyRef.current === key) {
+      return;
+    }
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      return;
+    }
+    try {
+      const snapshot = JSON.parse(raw) as { content?: string; updatedAt?: number; version?: number };
+      if (typeof snapshot.content !== 'string' || !snapshot.content) {
+        return;
+      }
+      const remoteUpdatedAt = chapterDetailQuery.data.updatedAt ? new Date(chapterDetailQuery.data.updatedAt).getTime() : 0;
+      const remoteContent = chapterDetailQuery.data.content ?? '';
+      const localUpdatedAt = snapshot.updatedAt ?? 0;
+      const shouldRestore = snapshot.content !== remoteContent && (localUpdatedAt > remoteUpdatedAt || !remoteUpdatedAt);
+      if (shouldRestore) {
+        restoredDraftKeyRef.current = key;
+        setDraftContent(snapshot.content);
+        toast({ title: '已恢复本地草稿', description: '载入了最近一次自动保存的草稿内容。', variant: 'info' });
+      }
+    } catch {
+      localStorage.removeItem(key);
+    }
+  }, [chapterDetailQuery.data, projectId, selectedChapterId, streamState.status, toast]);
+
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!unsavedChanges) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [unsavedChanges]);
+
+  useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => {
+      const isMeta = event.metaKey || event.ctrlKey;
+      if (!isMeta) {
+        return;
+      }
+      if (event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        handleSave();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (isStreaming) {
+          handleCancelStream();
+        } else if (selectedChapterId) {
+          handleContinue();
+        } else {
+          handleGenerate();
+        }
+      } else if (event.key === '.') {
+        event.preventDefault();
+        handleCancelStream();
+      }
+    };
+    window.addEventListener('keydown', handleKeydown);
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+    };
+  }, [handleCancelStream, handleContinue, handleGenerate, handleSave, isStreaming, selectedChapterId]);
 
   const handleGenerate = useCallback(() => {
     if (!projectId) {
@@ -594,11 +1102,14 @@ const ProjectEditorPage = () => {
     );
   }
 
-  const isStreaming = streamState.status === 'streaming' || streamState.status === 'pending';
+  const isStreaming = streamState.status === 'streaming' || streamState.status === 'pending' || isCancelling;
   const projectName = projectQuery.data?.name ?? '未命名项目';
   const activeChapter = chaptersQuery.data?.find((chapter) => chapter.id === selectedChapterId) ?? null;
 
   const statusLabel = (() => {
+    if (isCancelling) {
+      return '正在取消…';
+    }
     switch (streamState.status) {
       case 'pending':
         return '正在准备…';
@@ -617,7 +1128,30 @@ const ProjectEditorPage = () => {
     'bg-brand/20 text-brand': streamState.status === 'streaming' || streamState.status === 'pending',
     'bg-emerald-500/20 text-emerald-200': streamState.status === 'completed',
     'bg-rose-500/20 text-rose-100': streamState.status === 'error',
-    'bg-slate-800 text-slate-300': streamState.status === 'idle',
+    'bg-amber-500/20 text-amber-100': isCancelling,
+    'bg-slate-800 text-slate-300': streamState.status === 'idle' && !isCancelling,
+  });
+
+  const connectionLabel = (() => {
+    switch (connectionState) {
+      case 'connecting':
+        return '连接中…';
+      case 'connected':
+        return '已连接';
+      case 'retrying':
+        return `重试第 ${Math.min(Math.max(reconnectAttemptRef.current, 1), MAX_RECONNECT_ATTEMPTS)} 次…`;
+      case 'disconnected':
+        return '连接已断开';
+      default:
+        return '未连接';
+    }
+  })();
+
+  const connectionClass = clsx('rounded-full border px-2 py-0.5 text-[11px] font-medium', {
+    'border-brand/40 text-brand': connectionState === 'connected',
+    'border-amber-400/70 text-amber-200': connectionState === 'retrying' || connectionState === 'connecting',
+    'border-rose-400/70 text-rose-200': connectionState === 'disconnected',
+    'border-slate-600 text-slate-400': connectionState === 'idle',
   });
 
   return (
@@ -653,14 +1187,27 @@ const ProjectEditorPage = () => {
                 )}
               </select>
             </div>
-            <div className="flex items-center gap-2 text-xs text-slate-400">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <span className={statusClass}>{statusLabel}</span>
+              <span className={connectionClass}>{connectionLabel}</span>
+              {canReconnect ? (
+                <button
+                  type="button"
+                  onClick={handleReconnect}
+                  disabled={connectionState === 'connected' || isCancelling}
+                  className="rounded-full border border-slate-700/70 px-3 py-1 text-[11px] text-slate-300 transition hover:border-brand/60 hover:text-brand disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-600"
+                >
+                  重新连接
+                </button>
+              ) : null}
               <div className="hidden h-5 w-px bg-slate-700/60 sm:block" />
               <span>进度：{streamState.progress ? `${Math.min(streamState.progress, 100).toFixed(0)}%` : '—'}</span>
               <span className="hidden sm:inline">·</span>
               <span>Tokens：{streamState.tokens || '—'}</span>
               <span className="hidden sm:inline">·</span>
               <span>耗时：{formatDuration(streamState.durationMs)}</span>
+              <span className="hidden sm:inline">·</span>
+              <span className="whitespace-nowrap">请求 ID：{streamState.requestId ?? '—'}</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button

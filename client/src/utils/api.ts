@@ -4,6 +4,31 @@ export interface FetchOptions extends RequestInit {
   body?: string;
 }
 
+export class HttpError extends Error {
+  status: number;
+
+  requestId?: string;
+
+  code?: string;
+
+  details?: unknown;
+
+  constructor(message: string, status: number, options: { requestId?: string | null; code?: string; details?: unknown } = {}) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+    if (options.requestId && options.requestId.trim()) {
+      this.requestId = options.requestId.trim();
+    }
+    if (options.code) {
+      this.code = options.code;
+    }
+    if (options.details !== undefined) {
+      this.details = options.details;
+    }
+  }
+}
+
 export async function fetchJson<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const url = `${API_BASE}${path}`;
   const headers = new Headers(options.headers ?? {});
@@ -20,25 +45,44 @@ export async function fetchJson<T>(path: string, options: FetchOptions = {}): Pr
     headers,
   });
 
+  const requestId = response.headers.get('x-request-id');
+  const rawBody = await response.text();
+
   if (!response.ok) {
-    const errorText = await response.text();
     let message = `请求失败，状态码 ${response.status}`;
-    if (errorText) {
+    let code: string | undefined;
+    let details: unknown;
+
+    if (rawBody) {
       try {
-        const parsed = JSON.parse(errorText) as { message?: string };
+        const parsed = JSON.parse(rawBody) as { message?: string; code?: string; details?: unknown };
         if (parsed.message) {
           message = parsed.message;
         }
+        if (parsed.code && typeof parsed.code === 'string') {
+          code = parsed.code;
+        }
+        if (parsed.details !== undefined) {
+          details = parsed.details;
+        }
       } catch {
-        message = errorText;
+        message = rawBody;
       }
     }
-    throw new Error(message);
+
+    throw new HttpError(message, response.status, { requestId, code, details });
   }
 
-  if (response.status === 204) {
+  if (!rawBody || response.status === 204) {
     return {} as T;
   }
 
-  return (await response.json()) as T;
+  try {
+    return JSON.parse(rawBody) as T;
+  } catch {
+    throw new HttpError('响应解析失败，请稍后重试。', response.status, {
+      requestId,
+      details: rawBody,
+    });
+  }
 }
