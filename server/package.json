@@ -1,12 +1,24 @@
 {
   "name": "ai-novel-server",
-
+  "version": "1.0.0",
+  "description": "Backend service for AI-powered novel generation",
+  "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test": "jest"
   },
   "dependencies": {
     "cors": "^2.8.5",
-
+    "express": "^4.19.2",
+    "mongoose": "^7.6.3",
+    "morgan": "^1.10.0",
+    "nanoid": "^4.0.2",
+    "openai": "^4.56.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.1.4",
+    "supertest": "^6.3.4"
   }
 }
