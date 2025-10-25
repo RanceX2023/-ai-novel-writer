@@ -9,7 +9,7 @@ import {
   revertChapterVersion,
   updateChapter,
 } from '../controllers/chapterController';
-import { getProjectEditorContext } from '../controllers/projectController';
+import { createProject, getProjectEditorContext, listProjects, saveProjectStyle } from '../controllers/projectController';
 import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
 import { streamJob } from '../controllers/streamController';
 import {
@@ -37,8 +37,13 @@ import {
   plotPointUpdateSchema,
   plotSuggestionSchema,
 } from '../validators/plot';
+import { projectCreateSchema, projectStyleSchema } from '../validators/project';
 
 const router = Router();
+
+router.get('/projects', listProjects);
+router.post('/projects', validateBody(projectCreateSchema), createProject);
+router.post('/projects/:projectId/style', validateBody(projectStyleSchema), saveProjectStyle);
 
 router.get('/projects/:projectId/editor-context', getProjectEditorContext);
 router.get('/projects/:projectId/chapters', listChapters);

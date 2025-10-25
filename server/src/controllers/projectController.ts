@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { Types } from 'mongoose';
-import ProjectModel from '../models/Project';
+import ProjectModel, { Project, StyleProfile as ProjectStyleProfile } from '../models/Project';
 import ApiError from '../utils/ApiError';
+import { ProjectCreateInput, ProjectStyleInput } from '../validators/project';
 
 function ensureObjectId(value: string | undefined, label: string): Types.ObjectId {
   if (!value || !Types.ObjectId.isValid(value)) {
@@ -9,6 +10,100 @@ function ensureObjectId(value: string | undefined, label: string): Types.ObjectI
   }
   return new Types.ObjectId(value);
 }
+
+function normaliseStyleProfile(style?: ProjectStyleProfile | null) {
+  if (!style) {
+    return null;
+  }
+  return {
+    genre: style.genre ?? null,
+    tone: style.tone ?? null,
+    pacing: style.pacing ?? null,
+    pov: style.pov ?? null,
+    voice: style.voice ?? null,
+    language: style.language ?? null,
+    instructions: style.instructions ?? null,
+  };
+}
+
+type SerializableProject = Pick<Project, 'name' | 'synopsis' | 'styleProfile'> & {
+  _id: Types.ObjectId;
+  createdAt?: Date | string | null;
+  updatedAt?: Date | string | null;
+};
+
+function serialiseProject(project: SerializableProject) {
+  return {
+    id: project._id.toString(),
+    name: project.name,
+    synopsis: project.synopsis ?? null,
+    createdAt: project.createdAt ? new Date(project.createdAt).toISOString() : null,
+    updatedAt: project.updatedAt ? new Date(project.updatedAt).toISOString() : null,
+    styleProfile: normaliseStyleProfile(project.styleProfile ?? null),
+  };
+}
+
+export const listProjects = async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const projects = await ProjectModel.find()
+      .sort({ createdAt: -1 })
+      .select({ name: 1, synopsis: 1, styleProfile: 1, createdAt: 1, updatedAt: 1 })
+      .lean();
+
+    res.json({
+      projects: projects.map((project) => serialiseProject(project as SerializableProject)),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const createProject = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const payload = req.body as ProjectCreateInput;
+    const project = await ProjectModel.create({
+      name: payload.name,
+      synopsis: payload.synopsis ?? undefined,
+    });
+    const created = project.toObject();
+    res.status(201).json({
+      project: serialiseProject(created as SerializableProject),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const saveProjectStyle = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const projectId = ensureObjectId(req.params.projectId, 'projectId');
+    const payload = req.body as ProjectStyleInput;
+
+    const project = await ProjectModel.findById(projectId);
+    if (!project) {
+      throw new ApiError(404, 'Project not found');
+    }
+
+    project.styleProfile = {
+      genre: payload.genre,
+      tone: payload.tone,
+      pacing: payload.pacing,
+      pov: payload.pov,
+      voice: payload.voice ?? undefined,
+      language: payload.language ?? '中文',
+      instructions: payload.instructions ?? undefined,
+    };
+
+    await project.save();
+
+    const saved = project.toObject();
+    res.json({
+      project: serialiseProject(saved as SerializableProject),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 
 export const getProjectEditorContext = async (
   req: Request,
@@ -36,6 +131,7 @@ export const getProjectEditorContext = async (
         name: project.name,
         synopsis: project.synopsis ?? null,
         outline,
+        styleProfile: normaliseStyleProfile(project.styleProfile ?? null),
       },
     });
   } catch (error) {
