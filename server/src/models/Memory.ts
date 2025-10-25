@@ -1,42 +1,56 @@
-import { Schema, Types, model, HydratedDocument } from 'mongoose';
+import { HydratedDocument, Schema, Types, model } from 'mongoose';
 
-export type MemoryKind = 'fact' | 'constraint' | 'continuity' | 'character' | 'world' | 'note';
-export type MemoryStrength = 'low' | 'medium' | 'high';
+export type MemoryType = 'world' | 'fact' | 'prior_summary' | 'taboo';
+
+export interface MemoryReference {
+  chapterId?: Types.ObjectId;
+  label?: string;
+  addedAt?: Date;
+}
 
 export interface Memory {
   project: Types.ObjectId;
-  label: string;
+  key: string;
+  type: MemoryType;
   content: string;
-  type?: MemoryKind;
-  strength?: MemoryStrength;
-  tags?: string[];
+  weight: number;
+  refs: MemoryReference[];
+  category?: string | null;
   metadata?: Record<string, unknown> | null;
-  createdBy?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 export type MemoryDocument = HydratedDocument<Memory>;
 
+const MemoryReferenceSchema = new Schema<MemoryReference>(
+  {
+    chapterId: { type: Schema.Types.ObjectId, ref: 'Chapter' },
+    label: { type: String },
+    addedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const MemorySchema = new Schema<Memory>(
   {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true },
-    label: { type: String, required: true },
-    content: { type: String, required: true },
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    key: { type: String, required: true },
     type: {
       type: String,
-      enum: ['fact', 'constraint', 'continuity', 'character', 'world', 'note'],
+      required: true,
+      enum: ['world', 'fact', 'prior_summary', 'taboo'],
     },
-    strength: {
-      type: String,
-      enum: ['low', 'medium', 'high'],
-    },
-    tags: [{ type: String }],
+    content: { type: String, required: true },
+    weight: { type: Number, min: 0, max: 1, default: 0.6 },
+    refs: { type: [MemoryReferenceSchema], default: [] },
+    category: { type: String },
     metadata: { type: Schema.Types.Mixed },
-    createdBy: { type: String },
   },
   { timestamps: true }
 );
+
+MemorySchema.index({ project: 1, type: 1, key: 1 }, { unique: true });
 
 const MemoryModel = model<Memory>('Memory', MemorySchema);
 

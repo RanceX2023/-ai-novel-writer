@@ -9,6 +9,7 @@ import {
   revertChapterVersion,
   updateChapter,
 } from '../controllers/chapterController';
+import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
 import { streamJob } from '../controllers/streamController';
 import { validateBody } from '../middleware/validate';
 import {
@@ -17,6 +18,7 @@ import {
   chapterRevertSchema,
   chapterUpdateSchema,
 } from '../validators/chapter';
+import { memorySyncSchema } from '../validators/memory';
 
 const router = Router();
 
@@ -45,6 +47,13 @@ router.post(
   '/projects/:projectId/chapters/:chapterId/continue',
   validateBody(chapterContinuationSchema),
   continueChapter
+);
+
+router.get('/projects/:projectId/memory', getProjectMemory);
+router.post(
+  '/projects/:projectId/memory/sync',
+  validateBody(memorySyncSchema),
+  syncProjectMemory
 );
 
 router.get('/stream/:jobId', streamJob);

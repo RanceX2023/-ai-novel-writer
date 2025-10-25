@@ -7,6 +7,7 @@ import ProjectModel, { ProjectDocument, OutlineNode, StyleProfile as ProjectStyl
 import MemoryModel from '../models/Memory';
 import StyleProfileModel, { StyleProfileAttributes, StyleProfileDocument } from '../models/StyleProfile';
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
+import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
 import { PromptMemoryFragment, PromptStyleProfile } from '../utils/promptTemplates';
 
@@ -35,14 +36,17 @@ interface JobExecutionContext {
 class GenerationService {
   private openAI: OpenAIService;
 
+  private memoryService?: MemoryService;
+
   private streamSubscriptions: Map<string, Set<SseSubscription>>;
 
   private jobControllers: Map<string, AbortController>;
 
   private costPer1KTokens: number;
 
-  constructor({ openAIService }: { openAIService?: OpenAIService } = {}) {
+  constructor({ openAIService, memoryService }: { openAIService?: OpenAIService; memoryService?: MemoryService } = {}) {
     this.openAI = openAIService ?? new OpenAIService();
+    this.memoryService = memoryService;
     this.streamSubscriptions = new Map();
     this.jobControllers = new Map();
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
@@ -142,6 +146,14 @@ class GenerationService {
       };
       job.markModified('result');
 
+      await this.triggerMemorySync({
+        project,
+        chapterId: chapterDoc._id,
+        chapterTitle,
+        content: chapterDoc.content ?? streamResult.content,
+        chapterOrder: chapterDoc.order ?? undefined,
+      });
+
       this.applyUsageToJob(job, streamResult.usage, streamResult.estimatedTokens, streamResult.model);
       await job.save();
     });
@@ -223,6 +235,14 @@ class GenerationService {
         delta: streamResult.content,
       };
       job.markModified('result');
+
+      await this.triggerMemorySync({
+        project,
+        chapterId: updatedChapter._id,
+        chapterTitle: updatedChapter.title,
+        content: updatedChapter.content ?? streamResult.content,
+        chapterOrder: updatedChapter.order ?? undefined,
+      });
 
       this.applyUsageToJob(job, streamResult.usage, streamResult.estimatedTokens, streamResult.model);
       await job.save();
@@ -454,28 +474,30 @@ class GenerationService {
     memoryIds?: string[],
     inlineFragments?: MemoryFragmentInput
   ): Promise<PromptMemoryFragment[]> {
-    const baseFragments = (project.memoryBank || []).map((fragment) => ({
+    const pipelineFragments = this.memoryService
+      ? await this.memoryService.getPromptFragments(project._id)
+      : await MemoryModel.find({ project: project._id })
+          .sort({ weight: -1, updatedAt: -1 })
+          .limit(36)
+          .lean()
+          .then((docs) => docs.map((doc) => this.fromStoredMemory(doc)));
+
+    const bankFragments = (project.memoryBank || []).map((fragment) => ({
       label: fragment.label || fragment.key || '记忆',
       content: fragment.content || '',
       type: fragment.metadata?.type ? String(fragment.metadata.type) : 'fact',
       tags: fragment.tags || [],
     }));
 
-    const persisted: PromptMemoryFragment[] = memoryIds?.length
-      ? await MemoryModel.find({
-          _id: { $in: memoryIds },
-          project: project._id,
-        })
-          .lean()
-          .then((docs) =>
-            docs.map((doc) => ({
-              label: doc.label,
-              content: doc.content,
-              type: doc.type,
-              tags: doc.tags,
-              strength: doc.strength,
-            }))
-          )
+    const selectedFragments = memoryIds?.length
+      ? this.memoryService
+        ? await this.memoryService.getPromptFragmentsByIds(project._id, memoryIds)
+        : await MemoryModel.find({
+            _id: { $in: memoryIds },
+            project: project._id,
+          })
+            .lean()
+            .then((docs) => docs.map((doc) => this.fromStoredMemory(doc)))
       : [];
 
     const inline: PromptMemoryFragment[] = (inlineFragments || []).map((fragment) => ({
@@ -486,7 +508,12 @@ class GenerationService {
       strength: fragment.strength,
     }));
 
-    return this.deduplicateMemoryFragments([...baseFragments, ...persisted, ...inline]);
+    return this.deduplicateMemoryFragments([
+      ...pipelineFragments,
+      ...bankFragments,
+      ...selectedFragments,
+      ...inline,
+    ]);
   }
 
   private deduplicateMemoryFragments(fragments: PromptMemoryFragment[]): PromptMemoryFragment[] {
@@ -500,6 +527,39 @@ class GenerationService {
       }
     });
     return result.slice(0, 50);
+  }
+
+  private fromStoredMemory(doc: { key: string; content: string; type?: string; weight?: number }): PromptMemoryFragment {
+    const type = (doc.type as PromptMemoryFragment['type']) ?? 'fact';
+    const labelMap: Record<string, string> = {
+      world: '世界设定',
+      fact: '剧情事实',
+      prior_summary: '章节概要',
+      taboo: '禁忌事项',
+    };
+    const prefix = labelMap[type as string] ?? '记忆片段';
+    return {
+      label: `【${prefix}】${doc.key}`,
+      content: doc.content,
+      type,
+      strength: this.weightToStrength(doc.weight),
+    };
+  }
+
+  private weightToStrength(weight?: number): string | undefined {
+    if (typeof weight !== 'number') {
+      return undefined;
+    }
+    if (weight >= 0.75) {
+      return 'high';
+    }
+    if (weight >= 0.5) {
+      return 'medium';
+    }
+    if (weight > 0) {
+      return 'low';
+    }
+    return undefined;
   }
 
   private async resolveStyleProfile(
@@ -634,6 +694,38 @@ class GenerationService {
     });
     await chapter.save();
     return chapter;
+  }
+
+  private async triggerMemorySync({
+    project,
+    chapterId,
+    chapterTitle,
+    content,
+    chapterOrder,
+  }: {
+    project: ProjectDocument;
+    chapterId: Types.ObjectId;
+    chapterTitle?: string;
+    content: string;
+    chapterOrder?: number;
+  }): Promise<void> {
+    if (!this.memoryService) {
+      return;
+    }
+
+    try {
+      await this.memoryService.syncFromChapter({
+        projectId: project._id,
+        projectName: project.name,
+        synopsis: project.synopsis,
+        chapterId,
+        chapterTitle,
+        chapterContent: content,
+        chapterOrder,
+      });
+    } catch (error) {
+      console.error('[GenerationService] Memory extraction failed', error);
+    }
   }
 
   private summariseText(text: string | undefined | null, maxLength = 640): string | undefined {
