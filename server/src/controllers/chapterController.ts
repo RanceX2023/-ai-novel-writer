@@ -3,6 +3,7 @@ import { Types } from 'mongoose';
 import GenerationService from '../services/generationService';
 import ChapterModel, { Chapter, ChapterDocument, ChapterVersion } from '../models/Chapter';
 import ApiError from '../utils/ApiError';
+import { getRequestLogger } from '../utils/httpLogger';
 import {
   ChapterContinuationInput,
   ChapterGenerationInput,
@@ -364,6 +365,16 @@ export const generateChapter = async (req: Request, res: Response, next: NextFun
     const payload = req.body as ChapterGenerationInput;
     const job = await getGenerationService(req).createChapterGenerationJob(projectId, payload);
 
+    getRequestLogger(req).info(
+      {
+        jobId: job.id,
+        projectId,
+        type: job.type,
+        model: payload.model ?? null,
+      },
+      'chapter generation job queued'
+    );
+
     res.status(202).json({
       jobId: job.id,
       status: job.status,
@@ -385,6 +396,17 @@ export const continueChapter = async (req: Request, res: Response, next: NextFun
 
     const payload = req.body as ChapterContinuationInput;
     const job = await getGenerationService(req).createChapterContinuationJob(projectId, chapterId, payload);
+
+    getRequestLogger(req).info(
+      {
+        jobId: job.id,
+        projectId,
+        chapterId,
+        type: job.type,
+        model: payload.model ?? null,
+      },
+      'chapter continuation job queued'
+    );
 
     res.status(202).json({
       jobId: job.id,
