@@ -77,6 +77,28 @@ export type ChatCompletionStream = AsyncIterable<ChatCompletionStreamChunk>;
 
 type ChatCompletionResult = ChatCompletionStream | ChatCompletionResponse;
 
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatCompletionOptions {
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  responseFormat?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  messages: ChatMessage[];
+}
+
+export interface ChatCompletionResultData {
+  content: string;
+  usage?: UsageRecord;
+  model: string;
+  keyDocId: Types.ObjectId;
+  requestId?: string;
+}
+
 export interface OpenAIClient {
   chat: {
     completions: {
@@ -228,6 +250,59 @@ class OpenAIService {
         model,
         requestId,
         keyDocId: keyDoc._id,
+      };
+    });
+  }
+
+  async completeChat(options: ChatCompletionOptions): Promise<ChatCompletionResultData> {
+    const model = options.model || this.defaultModel;
+
+    return this.withClient(async (client, keyDoc) => {
+      const params: Record<string, unknown> = {
+        model,
+        messages: options.messages,
+        temperature: options.temperature ?? 0.7,
+      };
+
+      if (options.maxTokens) {
+        params.max_tokens = options.maxTokens;
+      }
+
+      if (options.responseFormat) {
+        params.response_format = options.responseFormat;
+      }
+
+      const response = (await client.chat.completions.create(params)) as ChatCompletionResponse;
+      const content = response.choices?.[0]?.message?.content ?? '';
+      const usage = this.normaliseUsage(response.usage);
+      const requestId = response.id;
+
+      if (usage) {
+        await Promise.all([
+          this.keyManager.markUsage(keyDoc, {
+            tokens: usage.totalTokens,
+          }),
+          this.usageModel.create({
+            apiKey: keyDoc._id,
+            model,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            totalTokens: usage.totalTokens,
+            requestId,
+            metadata: {
+              type: 'chat_completion',
+              ...(options.metadata ?? {}),
+            },
+          }),
+        ]);
+      }
+
+      return {
+        content,
+        usage,
+        model,
+        keyDocId: keyDoc._id,
+        requestId,
       };
     });
   }

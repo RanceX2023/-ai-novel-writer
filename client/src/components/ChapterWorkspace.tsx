@@ -4,9 +4,10 @@ import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import DiffMatchPatch from 'diff-match-patch';
+import PlotPlannerPanel from './plot/PlotPlannerPanel';
+import { API_BASE, fetchJson } from '../utils/api';
 import './ChapterWorkspace.css';
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000').replace(/\/$/, '');
 const DEFAULT_PROJECT_ID = (import.meta.env.VITE_DEFAULT_PROJECT_ID || '').trim();
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 const diffEngine = new DiffMatchPatch();
@@ -83,48 +84,6 @@ interface AiState {
   text: string;
   jobId?: string;
   error?: string;
-}
-
-interface FetchOptions extends RequestInit {
-  body?: string;
-}
-
-async function fetchJson<T>(path: string, options: FetchOptions = {}): Promise<T> {
-  const url = `${API_BASE}${path}`;
-  const headers = new Headers(options.headers ?? {});
-  if (!headers.has('Accept')) {
-    headers.set('Accept', 'application/json');
-  }
-  if (options.body && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let message = `请求失败，状态码 ${response.status}`;
-    if (errorText) {
-      try {
-        const parsed = JSON.parse(errorText) as { message?: string };
-        if (parsed.message) {
-          message = parsed.message;
-        }
-      } catch {
-        message = errorText;
-      }
-    }
-    throw new Error(message);
-  }
-
-  if (response.status === 204) {
-    return {} as T;
-  }
-
-  return (await response.json()) as T;
 }
 
 const fetchChapterSummaries = async (projectId: string): Promise<ChapterSummary[]> => {
@@ -977,6 +936,13 @@ const ChapterWorkspace = () => {
             )}
           </div>
         </section>
+
+        <PlotPlannerPanel
+          projectId={projectId}
+          chapters={chaptersQuery.data ?? []}
+          selectedChapterId={selectedChapterId}
+          onSelectChapter={(chapterId) => setSelectedChapterId(chapterId)}
+        />
       </main>
 
       <aside className="workspace__aside">
