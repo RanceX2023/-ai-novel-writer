@@ -103,6 +103,7 @@ class GenerationService {
         memoryIds: payload.memoryIds,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
+        model: payload.model,
       },
     });
 
@@ -121,6 +122,7 @@ class GenerationService {
         continuation: false,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
+        model: payload.model,
         signal,
       };
 
@@ -194,6 +196,7 @@ class GenerationService {
         memoryIds: payload.memoryIds,
         targetLength: payload.targetLength,
         instructions: payload.instructions,
+        model: payload.model,
       },
     });
 
@@ -214,6 +217,7 @@ class GenerationService {
         previousSummary: this.summariseText(chapter.content),
         targetLength: payload.targetLength,
         instructions: payload.instructions,
+        model: payload.model,
         signal,
       };
 

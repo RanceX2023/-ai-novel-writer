@@ -41,6 +41,7 @@ export const chapterGenerationSchema = z.object({
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema.optional(),
   instructions: z.string().trim().min(1).max(2000).optional(),
+  model: z.string().trim().min(1).max(80).optional(),
 });
 
 export const chapterContinuationSchema = z.object({
@@ -57,6 +58,7 @@ export const chapterContinuationSchema = z.object({
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema,
   instructions: z.string().trim().min(1).max(2000).optional(),
+  model: z.string().trim().min(1).max(80).optional(),
 });
 
 export const chapterUpdateSchema = z
