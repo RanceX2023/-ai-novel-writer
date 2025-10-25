@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson, HttpError } from '../utils/api';
 import { cancelStreamJob } from '../api/stream';
@@ -131,6 +131,22 @@ function formatDuration(durationMs: number | undefined): string {
   const minutes = Math.floor(seconds / 60);
   const remain = Math.round((seconds % 60) * 10) / 10;
   return `${minutes} 分 ${remain.toFixed(1)} 秒`;
+}
+
+function formatAutoSaveTime(timestamp?: number): string {
+  if (!timestamp) {
+    return '';
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleTimeString('zh-CN', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function targetLengthPayload(value: number, unit: 'characters' | 'paragraphs') {
@@ -412,6 +428,7 @@ const ProjectEditorPage = () => {
   const resetStreamBuffers = useCallback(() => {
     pendingTokensRef.current = [];
     streamBufferRef.current = '';
+    baseContentRef.current = '';
     cancelPendingFlush();
   }, [cancelPendingFlush]);
 
@@ -675,33 +692,64 @@ const ProjectEditorPage = () => {
       return;
     }
 
+    const jobSnapshot = activeJobRef.current ?? (streamState.mode ? { jobId, mode: streamState.mode } : null);
+
     isManualCancelRef.current = true;
     setIsCancelling(true);
     cleanupStream({ resetState: false });
+    if (jobSnapshot) {
+      activeJobRef.current = jobSnapshot;
+    }
     reconnectAttemptRef.current = 0;
-    setStreamState((prev) => ({ ...prev, status: 'idle', mode: null, jobId: undefined }));
     setConnectionState('disconnected');
 
     try {
       const response = await cancelStreamJob(jobId);
+      activeJobRef.current = null;
+      setStreamState((prev) => ({
+        ...prev,
+        status: 'idle',
+        mode: null,
+        jobId: undefined,
+        error: undefined,
+      }));
       setConnectionState('idle');
       toast({ title: '生成已取消', description: response?.message ?? '已停止当前生成任务。', variant: 'success' });
     } catch (error) {
-      const message = error instanceof HttpError ? error.message : '取消生成失败，请稍后重试。';
-      const requestId = error instanceof HttpError ? error.requestId : undefined;
-      setStreamState((prev) => ({
-        ...prev,
-        status: 'error',
-        error: message,
-        requestId: requestId ?? prev.requestId,
-      }));
-      const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
-      toast({ title: '取消失败', description, variant: 'error' });
+      if (error instanceof HttpError && error.code === 'GENERATION_NOT_ACTIVE') {
+        activeJobRef.current = null;
+        setStreamState((prev) => ({
+          ...prev,
+          status: 'idle',
+          mode: null,
+          jobId: undefined,
+          error: undefined,
+        }));
+        setConnectionState('idle');
+        toast({ title: '任务已结束', description: error.message, variant: 'info' });
+      } else {
+        const message = error instanceof HttpError ? error.message : '取消生成失败，请稍后重试。';
+        const requestId = error instanceof HttpError ? error.requestId : undefined;
+        if (jobSnapshot) {
+          activeJobRef.current = jobSnapshot;
+        }
+        setStreamState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: message,
+          jobId,
+          mode: jobSnapshot?.mode ?? prev.mode,
+          requestId: requestId ?? prev.requestId,
+        }));
+        setConnectionState('disconnected');
+        const description = requestId ? `${message}（请求 ID：${requestId}）` : message;
+        toast({ title: '取消失败', description, variant: 'error' });
+      }
     } finally {
       setIsCancelling(false);
       isManualCancelRef.current = false;
     }
-  }, [cleanupStream, streamState.jobId, toast]);
+  }, [cleanupStream, streamState.jobId, streamState.mode, toast]);
 
   const handleReconnect = useCallback(() => {
     const job = activeJobRef.current ?? (streamState.jobId && streamState.mode ? { jobId: streamState.jobId, mode: streamState.mode } : null);
@@ -712,6 +760,10 @@ const ProjectEditorPage = () => {
     setConnectionState('connecting');
     connectToStream(job.jobId, job.mode, { isReconnect: true });
   }, [connectToStream, streamState.jobId, streamState.mode]);
+
+  const handleStopStream = useCallback(() => {
+    void handleCancelStream();
+  }, [handleCancelStream]);
 
   const buildCommonPayload = useCallback(() => {
     const memoryIds = Array.from(selectedMemoryIds);
@@ -873,7 +925,7 @@ const ProjectEditorPage = () => {
   useEffect(() => {
     const savedContent = lastSavedContentRef.current;
     const hasUnsaved = draftContent !== savedContent;
-    setUnsavedChanges(hasUnsaved);
+    setUnsavedChanges((prev) => (prev === hasUnsaved ? prev : hasUnsaved));
     if (hasUnsaved && autoSaveState.status === 'success') {
       setAutoSaveState((prev) => ({ status: 'idle', timestamp: prev.timestamp, requestId: prev.requestId }));
     }
@@ -883,7 +935,7 @@ const ProjectEditorPage = () => {
   }, [draftContent, autoSaveState]);
 
   useEffect(() => {
-    if (!projectId || !selectedChapterId) {
+    if (typeof window === 'undefined' || !projectId || !selectedChapterId) {
       return;
     }
     if (!unsavedChanges) {
@@ -920,7 +972,7 @@ const ProjectEditorPage = () => {
   }, [draftContent, projectId, selectedChapterId, streamState.status, autoSaveMutation, unsavedChanges]);
 
   useEffect(() => {
-    if (!projectId || !selectedChapterId) {
+    if (typeof window === 'undefined' || !projectId || !selectedChapterId) {
       return;
     }
     const key = getDraftStorageKey(projectId, selectedChapterId);
@@ -929,7 +981,7 @@ const ProjectEditorPage = () => {
     }
 
     if (!unsavedChanges) {
-      localStorage.removeItem(key);
+      window.localStorage.removeItem(key);
       return;
     }
 
@@ -944,7 +996,7 @@ const ProjectEditorPage = () => {
         version: currentVersionRef.current ?? undefined,
       };
       try {
-        localStorage.setItem(key, JSON.stringify(payload));
+        window.localStorage.setItem(key, JSON.stringify(payload));
       } catch {
         // ignore storage quota errors
       }
@@ -960,14 +1012,20 @@ const ProjectEditorPage = () => {
   }, [draftContent, projectId, selectedChapterId, unsavedChanges]);
 
   useEffect(() => {
-    if (!projectId || !selectedChapterId || !chapterDetailQuery.data || streamState.status === 'streaming') {
+    if (
+      typeof window === 'undefined'
+      || !projectId
+      || !selectedChapterId
+      || !chapterDetailQuery.data
+      || streamState.status === 'streaming'
+    ) {
       return;
     }
     const key = getDraftStorageKey(projectId, selectedChapterId);
     if (!key || restoredDraftKeyRef.current === key) {
       return;
     }
-    const raw = localStorage.getItem(key);
+    const raw = window.localStorage.getItem(key);
     if (!raw) {
       return;
     }
@@ -1015,8 +1073,8 @@ const ProjectEditorPage = () => {
         handleSave();
       } else if (event.key === 'Enter') {
         event.preventDefault();
-        if (isStreaming) {
-          handleCancelStream();
+        if (isActiveStream) {
+          void handleCancelStream();
         } else if (selectedChapterId) {
           handleContinue();
         } else {
@@ -1024,14 +1082,14 @@ const ProjectEditorPage = () => {
         }
       } else if (event.key === '.') {
         event.preventDefault();
-        handleCancelStream();
+        void handleCancelStream();
       }
     };
     window.addEventListener('keydown', handleKeydown);
     return () => {
       window.removeEventListener('keydown', handleKeydown);
     };
-  }, [handleCancelStream, handleContinue, handleGenerate, handleSave, isStreaming, selectedChapterId]);
+  }, [handleCancelStream, handleContinue, handleGenerate, handleSave, isActiveStream, selectedChapterId]);
 
   const handleGenerate = useCallback(() => {
     if (!projectId) {
@@ -1102,7 +1160,8 @@ const ProjectEditorPage = () => {
     );
   }
 
-  const isStreaming = streamState.status === 'streaming' || streamState.status === 'pending' || isCancelling;
+  const isActiveStream = streamState.status === 'streaming' || streamState.status === 'pending';
+  const isStreaming = isActiveStream || isCancelling;
   const projectName = projectQuery.data?.name ?? '未命名项目';
   const activeChapter = chaptersQuery.data?.find((chapter) => chapter.id === selectedChapterId) ?? null;
 
@@ -1125,7 +1184,7 @@ const ProjectEditorPage = () => {
   })();
 
   const statusClass = clsx('px-3 py-1 text-xs font-medium rounded-full', {
-    'bg-brand/20 text-brand': streamState.status === 'streaming' || streamState.status === 'pending',
+    'bg-brand/20 text-brand': isActiveStream,
     'bg-emerald-500/20 text-emerald-200': streamState.status === 'completed',
     'bg-rose-500/20 text-rose-100': streamState.status === 'error',
     'bg-amber-500/20 text-amber-100': isCancelling,
@@ -1153,6 +1212,41 @@ const ProjectEditorPage = () => {
     'border-rose-400/70 text-rose-200': connectionState === 'disconnected',
     'border-slate-600 text-slate-400': connectionState === 'idle',
   });
+
+  const autoSaveLabel = (() => {
+    if (autoSaveState.status === 'saving') {
+      return '草稿保存中…';
+    }
+    if (autoSaveState.status === 'success') {
+      const time = formatAutoSaveTime(autoSaveState.timestamp);
+      return time ? `草稿已保存（${time}）` : '草稿已保存';
+    }
+    if (autoSaveState.status === 'error') {
+      return `草稿保存失败${autoSaveState.requestId ? `（请求 ID：${autoSaveState.requestId}）` : ''}`;
+    }
+    if (unsavedChanges) {
+      return '草稿待保存';
+    }
+    const time = formatAutoSaveTime(autoSaveState.timestamp);
+    return time ? `草稿最新（${time}）` : '草稿最新';
+  })();
+
+  const autoSaveClass = clsx('whitespace-nowrap', {
+    'text-amber-300': autoSaveState.status === 'saving',
+    'text-rose-300': autoSaveState.status === 'error',
+    'text-emerald-300': autoSaveState.status === 'success' && !unsavedChanges,
+    'text-slate-200': unsavedChanges && autoSaveState.status === 'idle',
+    'text-slate-400': !unsavedChanges && autoSaveState.status === 'idle',
+  });
+
+  const hasReconnectTarget = Boolean(
+    activeJobRef.current || (streamState.jobId && isActiveStream)
+  );
+
+  const canReconnect =
+    (connectionState === 'disconnected' || connectionState === 'retrying')
+    && hasReconnectTarget
+    && !isCancelling;
 
   return (
     <div className="min-h-screen bg-slate-950 pb-12">
@@ -1208,6 +1302,8 @@ const ProjectEditorPage = () => {
               <span>耗时：{formatDuration(streamState.durationMs)}</span>
               <span className="hidden sm:inline">·</span>
               <span className="whitespace-nowrap">请求 ID：{streamState.requestId ?? '—'}</span>
+              <span className="hidden sm:inline">·</span>
+              <span className={autoSaveClass}>{autoSaveLabel}</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -1229,7 +1325,7 @@ const ProjectEditorPage = () => {
               <button
                 type="button"
                 onClick={handleStopStream}
-                disabled={!isStreaming}
+                disabled={!isActiveStream || isCancelling}
                 className="inline-flex items-center justify-center rounded-full border border-rose-400/50 bg-slate-900 px-4 py-2 text-sm font-semibold text-rose-200 transition hover:border-rose-400 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
               >
                 停止
