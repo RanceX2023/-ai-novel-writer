@@ -16,6 +16,7 @@ export async function fetchJson<T>(path: string, options: FetchOptions = {}): Pr
 
   const response = await fetch(url, {
     ...options,
+    credentials: options.credentials ?? 'include',
     headers,
   });
 
