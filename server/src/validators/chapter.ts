@@ -59,5 +59,29 @@ export const chapterContinuationSchema = z.object({
   instructions: z.string().trim().min(1).max(2000).optional(),
 });
 
+export const chapterUpdateSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    content: z.string().max(400_000).optional(),
+    autosave: z.boolean().optional(),
+    metadata: z.record(z.any()).optional(),
+    baseVersion: z.number().int().min(0).optional(),
+  })
+  .refine(
+    (data) => data.title !== undefined || data.content !== undefined,
+    {
+      message: 'Request body must include content or title',
+      path: ['content'],
+    }
+  );
+
+export const chapterRevertSchema = z.object({
+  reason: z.string().trim().max(200).optional(),
+  metadata: z.record(z.any()).optional(),
+  baseVersion: z.number().int().min(0).optional(),
+});
+
 export type ChapterGenerationInput = z.infer<typeof chapterGenerationSchema>;
 export type ChapterContinuationInput = z.infer<typeof chapterContinuationSchema>;
+export type ChapterUpdateInput = z.infer<typeof chapterUpdateSchema>;
+export type ChapterRevertInput = z.infer<typeof chapterRevertSchema>;

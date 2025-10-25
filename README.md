@@ -70,6 +70,7 @@ cp client/.env.example client/.env
 | `VITE_API_BASE_URL` | `http://localhost:4000` | 后端接口地址 |
 | `VITE_APP_NAME` | `AI小说创作平台` | 前端展示名称 |
 | `VITE_APP_ENV` | `development` | 环境标识 |
+| `VITE_DEFAULT_PROJECT_ID` | *(空)* | 默认加载的项目 ID，用于章节编辑器 |
 
 ### 3. 后端环境变量
 
