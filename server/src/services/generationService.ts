@@ -646,7 +646,7 @@ class GenerationService {
       pov: style.pov,
       genre: style.genre,
       instructions: style.instructions,
-      language: '中文',
+      language: style.language || '中文',
     };
   }
 

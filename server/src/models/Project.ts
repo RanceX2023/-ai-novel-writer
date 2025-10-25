@@ -23,6 +23,7 @@ export interface StyleProfile {
   mood?: string;
   genre?: string;
   voice?: string;
+  language?: string;
   instructions?: string;
   additional?: Record<string, unknown> | null;
 }
@@ -78,6 +79,7 @@ const StyleProfileSchema = new Schema<StyleProfile>(
     mood: { type: String },
     genre: { type: String },
     voice: { type: String },
+    language: { type: String },
     instructions: { type: String },
     additional: { type: Schema.Types.Mixed },
   },
