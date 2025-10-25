@@ -2,6 +2,24 @@ import { z } from 'zod';
 
 const mongoIdRegex = /^[a-f0-9]{24}$/i;
 
+const fallbackModel = process.env.OPENAI_DEFAULT_MODEL?.trim() || 'gpt-4o-mini';
+const allowedModelCandidates = [
+  ...(process.env.OPENAI_ALLOWED_MODELS?.split(',').map((model) => model.trim()) ?? []),
+  fallbackModel,
+].filter(Boolean);
+const allowedModels = Array.from(new Set(allowedModelCandidates));
+
+const modelSchema = allowedModels.length
+  ? z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .refine((value) => allowedModels.includes(value), {
+        message: `model 必须为以下选项之一：${allowedModels.join(', ')}`,
+      })
+  : z.string().trim().min(1).max(80);
+
 const targetLengthSchema = z.object({
   unit: z.enum(['characters', 'paragraphs']),
   value: z.number().int().min(1).max(5000),
@@ -46,7 +64,7 @@ export const chapterGenerationSchema = z.object({
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema.optional(),
   instructions: z.string().trim().min(1).max(2000).optional(),
-  model: z.string().trim().min(1).max(80).optional(),
+  model: modelSchema.optional(),
 });
 
 export const chapterContinuationSchema = z.object({
@@ -67,7 +85,7 @@ export const chapterContinuationSchema = z.object({
   styleOverride: styleOverrideSchema.optional(),
   targetLength: targetLengthSchema,
   instructions: z.string().trim().min(1).max(2000).optional(),
-  model: z.string().trim().min(1).max(80).optional(),
+  model: modelSchema.optional(),
 });
 
 export const chapterUpdateSchema = z

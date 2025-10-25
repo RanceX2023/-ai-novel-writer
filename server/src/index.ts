@@ -3,6 +3,8 @@ import http from 'http';
 import { app } from './app';
 import { connectDatabase } from './config/database';
 import { initialiseOpenAIKeys } from './config/bootstrap';
+import logger from './utils/logger';
+import { flushPendingMetrics, stopMetricsTimer } from './utils/metrics';
 
 const PORT = Number(process.env.PORT || 4000);
 
@@ -13,23 +15,32 @@ async function start(): Promise<void> {
     try {
       await initialiseOpenAIKeys();
     } catch (error) {
-      console.error('[server] failed to initialise OpenAI keys from environment', error);
+      logger.error({ err: error }, '[server] failed to initialise OpenAI keys from environment');
     }
 
     const server = http.createServer(app);
     server.listen(PORT, () => {
-      console.log(`[server] listening on port ${PORT}`);
+      logger.info({ port: PORT }, '[server] listening');
     });
 
     const shutdown = () => {
-      console.log('[server] shutting down');
-      server.close(() => process.exit(0));
+      logger.info('[server] shutting down');
+      stopMetricsTimer();
+      flushPendingMetrics();
+      server.close((error) => {
+        if (error) {
+          logger.error({ err: error }, '[server] error while closing server');
+          process.exit(1);
+          return;
+        }
+        process.exit(0);
+      });
     };
 
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
   } catch (error) {
-    console.error('[server] failed to start', error);
+    logger.error({ err: error }, '[server] failed to start');
     process.exit(1);
   }
 }

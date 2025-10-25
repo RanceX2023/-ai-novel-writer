@@ -42,6 +42,7 @@ import {
   upsertOutlineNode,
 } from '../controllers/outlineController';
 import { validateBody } from '../middleware/validate';
+import { chapterContinuationLimiter, chapterGenerationLimiter } from '../middleware/rateLimiters';
 import {
   chapterContinuationSchema,
   chapterGenerationSchema,
@@ -112,12 +113,14 @@ router.post(
 
 router.post(
   '/projects/:projectId/chapters/generate',
+  chapterGenerationLimiter,
   validateBody(chapterGenerationSchema),
   generateChapter
 );
 
 router.post(
   '/projects/:projectId/chapters/:chapterId/continue',
+  chapterContinuationLimiter,
   validateBody(chapterContinuationSchema),
   continueChapter
 );

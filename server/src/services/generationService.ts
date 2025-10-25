@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import { Types } from 'mongoose';
+import { Logger } from 'pino';
 import ApiError from '../utils/ApiError';
 import ChapterModel, { Chapter } from '../models/Chapter';
 import GenJobModel, { GenerationJobDocument } from '../models/GenJob';
@@ -12,6 +13,7 @@ import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
 import { PromptCharacter, PromptMemoryFragment, PromptOutlineNode, PromptStyleProfile } from '../utils/promptTemplates';
+import baseLogger from '../utils/logger';
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const TARGET_PARAGRAPH_TOKEN_ESTIMATE = 80;
@@ -48,13 +50,24 @@ class GenerationService {
 
   private costPer1KTokens: number;
 
-  constructor({ openAIService, memoryService }: { openAIService?: OpenAIService; memoryService?: MemoryService } = {}) {
+  private logger: Logger;
+
+  constructor({
+    openAIService,
+    memoryService,
+    logger,
+  }: {
+    openAIService?: OpenAIService;
+    memoryService?: MemoryService;
+    logger?: Logger;
+  } = {}) {
     this.openAI = openAIService ?? new OpenAIService();
     this.memoryService = memoryService;
     this.streamSubscriptions = new Map();
     this.jobControllers = new Map();
     this.cancelledJobReasons = new Map();
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
+    this.logger = logger ?? baseLogger.child({ module: 'generation-service' });
   }
 
   registerStream(jobId: string, res: Response): void {
@@ -75,9 +88,12 @@ class GenerationService {
       clearInterval(heartbeat);
       const subscribers = this.streamSubscriptions.get(jobId);
       subscribers?.delete(subscription);
+
+      const hasActiveJob = this.jobControllers.has(jobId);
       if (!subscribers || subscribers.size === 0) {
         this.streamSubscriptions.delete(jobId);
-        if (this.jobControllers.has(jobId)) {
+        if (hasActiveJob) {
+          this.logger.warn({ jobId }, 'client disconnected from generation stream');
           this.cancelJob(jobId, 'Client disconnected from stream');
         }
       }
@@ -95,6 +111,7 @@ class GenerationService {
       this.cancelledJobReasons.set(jobId, message);
     }
 
+    this.logger.warn({ jobId, reason: message }, 'aborting generation job');
     controller.abort();
   }
 
@@ -131,6 +148,12 @@ class GenerationService {
         model: payload.model,
       },
     });
+
+    this.logger.info({
+      jobId: job._id.toString(),
+      projectId: project._id.toString(),
+      type: job.type,
+    }, 'created chapter generation job');
 
     const additionalOutline = this.buildAdditionalOutline(outlineNodes, outlineNode);
 
@@ -230,6 +253,13 @@ class GenerationService {
       },
     });
 
+    this.logger.info({
+      jobId: job._id.toString(),
+      projectId: project._id.toString(),
+      chapterId: chapter._id.toString(),
+      type: job.type,
+    }, 'created chapter continuation job');
+
     const additionalOutline = outlineNode
       ? this.buildAdditionalOutline(outlineNodes, outlineNode)
       : this.buildRootOutlineContext(outlineNodes);
@@ -294,6 +324,10 @@ class GenerationService {
     (async () => {
       const job = await GenJobModel.findById(jobId);
       if (!job) {
+        this.logger.error({ jobId }, 'generation job not found for execution');
+        this.jobControllers.delete(jobId);
+        this.cancelledJobReasons.delete(jobId);
+        this.finish(jobId);
         return;
       }
 
@@ -304,6 +338,13 @@ class GenerationService {
 
       const startedAt = Date.now();
 
+      this.logger.info({
+        jobId,
+        projectId: job.project?.toString(),
+        chapterId: job.chapter?.toString(),
+        type: job.type,
+      }, 'generation job started');
+
       try {
         await handler({ job, signal: controller.signal });
 
@@ -312,16 +353,37 @@ class GenerationService {
         job.progress = 100;
         await job.save();
 
+        const durationMs = Date.now() - startedAt;
+
+        this.logger.info({
+          jobId,
+          projectId: job.project?.toString(),
+          chapterId: job.chapter?.toString(),
+          type: job.type,
+          durationMs,
+          tokensGenerated: job.tokensGenerated ?? 0,
+          completionTokens: job.completionTokens ?? 0,
+          promptTokens: job.promptTokens ?? 0,
+          cost: job.cost ?? 0,
+        }, 'generation job completed');
+
         this.emit(jobId, 'done', {
           jobId,
           status: 'completed',
-          durationMs: Date.now() - startedAt,
+          durationMs,
         });
       } catch (error) {
-        if (this.cancelledJobReasons.has(jobId)) {
-          await this.markJobCancelled(job, this.cancelledJobReasons.get(jobId));
+        const durationMs = Date.now() - startedAt;
+        const cancellationReason = this.cancelledJobReasons.get(jobId);
+        if (cancellationReason) {
+          await this.failJob(
+            job,
+            new ApiError(499, cancellationReason, undefined, 'CLIENT_CLOSED_REQUEST'),
+            durationMs,
+            'CLIENT_CLOSED_REQUEST'
+          );
         } else {
-          await this.failJob(job, error);
+          await this.failJob(job, error, durationMs);
         }
       } finally {
         this.jobControllers.delete(jobId);
@@ -329,34 +391,44 @@ class GenerationService {
         this.finish(jobId);
       }
     })().catch((error) => {
-      console.error('[GenerationService] Unexpected job execution error', error);
+      this.logger.error({ jobId, err: error }, 'unexpected generation job execution error');
       this.jobControllers.delete(jobId);
       this.cancelledJobReasons.delete(jobId);
     });
   }
 
-  private async markJobCancelled(job: GenerationJobDocument, reason?: string): Promise<void> {
-    job.status = 'cancelled';
-    job.error = reason ? { message: reason } : null;
-    job.completedAt = new Date();
-    await job.save();
-
-    this.emit(job.id, 'done', {
-      jobId: job.id,
-      status: 'cancelled',
-      reason,
-    });
-  }
-
-  private async failJob(job: GenerationJobDocument, error: unknown): Promise<void> {
+  private async failJob(job: GenerationJobDocument, error: unknown, durationMs?: number, code?: string): Promise<void> {
     const serialisedError = this.serialiseError(error);
     job.status = 'failed';
     job.error = serialisedError;
     job.completedAt = new Date();
     await job.save();
 
-    this.emit(job.id, 'error', { message: serialisedError.message });
-    this.emit(job.id, 'done', { jobId: job.id, status: 'failed' });
+    this.logger.error({
+      jobId: job.id,
+      projectId: job.project?.toString(),
+      chapterId: job.chapter?.toString(),
+      type: job.type,
+      durationMs,
+      tokensGenerated: job.tokensGenerated ?? 0,
+      completionTokens: job.completionTokens ?? 0,
+      promptTokens: job.promptTokens ?? 0,
+      cost: job.cost ?? 0,
+      error: serialisedError.message,
+      code,
+    }, 'generation job failed');
+
+    const errorPayload: Record<string, unknown> = { message: serialisedError.message };
+    if (code) {
+      errorPayload.code = code;
+    }
+    this.emit(job.id, 'error', errorPayload);
+
+    const donePayload: Record<string, unknown> = { jobId: job.id, status: 'failed' };
+    if (code) {
+      donePayload.code = code;
+    }
+    this.emit(job.id, 'done', donePayload);
   }
 
   private serialiseError(error: unknown): { message: string; stack?: string } {
@@ -407,6 +479,57 @@ class GenerationService {
     }
   }
 
+  private createOpenAISignal(external?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+    const controller = new AbortController();
+    const timeoutMs = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS ?? 60_000);
+    let timeout: NodeJS.Timeout | undefined;
+
+    if (timeoutMs > 0) {
+      const timeoutError = new Error(`OpenAI request timed out after ${timeoutMs}ms`);
+      (timeoutError as Error & { status?: number }).status = 504;
+      timeout = setTimeout(() => {
+        if (!controller.signal.aborted) {
+          controller.abort(timeoutError);
+        }
+      }, timeoutMs);
+      timeout.unref?.();
+    }
+
+    const abortFromExternal = () => {
+      if (!controller.signal.aborted) {
+        if (external?.reason !== undefined) {
+          controller.abort(external.reason);
+        } else {
+          controller.abort();
+        }
+      }
+    };
+
+    if (external) {
+      if (external.aborted) {
+        abortFromExternal();
+      } else {
+        external.addEventListener('abort', abortFromExternal, { once: true });
+      }
+    }
+
+    const cleanup = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (external) {
+        external.removeEventListener('abort', abortFromExternal);
+      }
+    };
+
+    controller.signal.addEventListener('abort', cleanup, { once: true });
+
+    return {
+      signal: controller.signal,
+      cleanup,
+    };
+  }
+
   private async streamAndCollect(
     job: GenerationJobDocument,
     options: StreamChapterOptions,
@@ -415,37 +538,44 @@ class GenerationService {
     let tokensGenerated = 0;
     let lastProgress = 0;
 
-    const streamResult = await this.openAI.streamChapter({
-      ...options,
-      onDelta: (delta: string) => {
-        tokensGenerated += this.estimateTokens(delta);
-        const progress = this.estimateProgress(tokensGenerated, targetLength);
-        if (progress > lastProgress) {
-          lastProgress = progress;
-          job.progress = progress;
-          this.emit(job.id, 'progress', {
-            jobId: job.id,
-            progress,
-            tokensGenerated,
-          });
-        }
-        this.emit(job.id, 'delta', { text: delta });
-      },
-    });
+    const { signal, cleanup } = this.createOpenAISignal(options.signal);
 
-    if (streamResult.usage) {
-      tokensGenerated = Math.max(tokensGenerated, streamResult.usage.completionTokens);
+    try {
+      const streamResult = await this.openAI.streamChapter({
+        ...options,
+        signal,
+        onDelta: (delta: string) => {
+          tokensGenerated += this.estimateTokens(delta);
+          const progress = this.estimateProgress(tokensGenerated, targetLength);
+          if (progress > lastProgress) {
+            lastProgress = progress;
+            job.progress = progress;
+            this.emit(job.id, 'progress', {
+              jobId: job.id,
+              progress,
+              tokensGenerated,
+            });
+          }
+          this.emit(job.id, 'delta', { text: delta });
+        },
+      });
+
+      if (streamResult.usage) {
+        tokensGenerated = Math.max(tokensGenerated, streamResult.usage.completionTokens);
+      }
+
+      job.tokensGenerated = tokensGenerated;
+      job.progress = Math.max(job.progress ?? 0, lastProgress);
+
+      return {
+        content: streamResult.content,
+        usage: streamResult.usage,
+        model: streamResult.model,
+        estimatedTokens: tokensGenerated,
+      };
+    } finally {
+      cleanup();
     }
-
-    job.tokensGenerated = tokensGenerated;
-    job.progress = Math.max(job.progress ?? 0, lastProgress);
-
-    return {
-      content: streamResult.content,
-      usage: streamResult.usage,
-      model: streamResult.model,
-      estimatedTokens: tokensGenerated,
-    };
   }
 
   private applyUsageToJob(
