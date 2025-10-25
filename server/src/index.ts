@@ -2,12 +2,20 @@ import 'dotenv/config';
 import http from 'http';
 import { app } from './app';
 import { connectDatabase } from './config/database';
+import { initialiseOpenAIKeys } from './config/bootstrap';
 
 const PORT = Number(process.env.PORT || 4000);
 
 async function start(): Promise<void> {
   try {
     await connectDatabase();
+
+    try {
+      await initialiseOpenAIKeys();
+    } catch (error) {
+      console.error('[server] failed to initialise OpenAI keys from environment', error);
+    }
+
     const server = http.createServer(app);
     server.listen(PORT, () => {
       console.log(`[server] listening on port ${PORT}`);

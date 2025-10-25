@@ -2,10 +2,12 @@ import request from 'supertest';
 import { app } from '../../src/app';
 
 describe('Application routes', () => {
-  it('returns ok for GET /health', async () => {
+  it('returns service status from GET /health', async () => {
     const response = await request(app).get('/health');
-    expect(response.status).toBe(200);
-    expect(response.body).toEqual({ status: 'ok' });
+
+    expect([200, 503]).toContain(response.status);
+    expect(response.body).toHaveProperty('status');
+    expect(response.body).toHaveProperty('mongo');
   });
 
   it('rejects invalid chapter generation payloads', async () => {

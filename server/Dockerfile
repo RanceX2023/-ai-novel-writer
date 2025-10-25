@@ -1,12 +1,28 @@
 # syntax=docker/dockerfile:1
-FROM node:20-alpine
 
+FROM node:20-alpine AS base
 WORKDIR /app
 
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+FROM base AS build
 COPY . .
+RUN npm run build
 
-RUN if [ -f package.json ]; then npm install; fi
-
+FROM base AS development
+WORKDIR /app
+ENV NODE_ENV=development
+COPY --from=base /app/node_modules ./node_modules
+COPY . .
 EXPOSE 4000
+CMD ["npm", "run", "dev"]
 
-CMD ["sh", "-c", "if [ -f package.json ]; then if node -e \"const fs=require('fs');const path='./package.json';if(!fs.existsSync(path)){process.exit(2);}const scripts=require(path).scripts||{};if(scripts[process.argv[1]]){process.exit(0);}process.exit(1);\" start:dev; then npm run start:dev; elif node -e \"const fs=require('fs');const path='./package.json';if(!fs.existsSync(path)){process.exit(2);}const scripts=require(path).scripts||{};if(scripts[process.argv[1]]){process.exit(0);}process.exit(1);\" start; then npm run start; else echo '未找到 start 或 start:dev 脚本，请在 server/package.json 中补充后重新启动容器。'; exit 1; fi; else echo 'server 目录缺少 package.json，请创建后端项目后再重新构建镜像。'; exit 1; fi"]
+FROM node:20-alpine AS production
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+COPY --from=build /app/dist ./dist
+EXPOSE 4000
+CMD ["node", "dist/index.js"]

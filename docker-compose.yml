@@ -1,41 +1,6 @@
 version: "3.9"
 
 services:
-  client:
-    build:
-      context: ./client
-      dockerfile: Dockerfile
-    image: ${CLIENT_IMAGE:-ai-novel-client}
-    container_name: ${CLIENT_IMAGE:-ai-novel-client}
-    ports:
-      - "${CLIENT_PORT:-5173}:5173"
-    env_file:
-      - ./client/.env
-    depends_on:
-      - server
-    volumes:
-      - ./client:/app
-      - client-node-modules:/app/node_modules
-    restart: unless-stopped
-
-  server:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    image: ${SERVER_IMAGE:-ai-novel-server}
-    container_name: ${SERVER_IMAGE:-ai-novel-server}
-    ports:
-      - "${SERVER_PORT:-4000}:4000"
-    env_file:
-      - ./server/.env
-    volumes:
-      - ./server:/app
-      - server-node-modules:/app/node_modules
-    depends_on:
-      mongo:
-        condition: service_healthy
-    restart: unless-stopped
-
   mongo:
     image: mongo:6.0
     container_name: mongo
@@ -48,10 +13,79 @@ services:
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "mongosh \"mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin\" --quiet --eval 'db.runCommand({ ping: 1 })'"]
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh \"mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin\" --quiet --eval 'db.runCommand({ ping: 1 })'"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ./server
+      target: development
+    image: ${SERVER_IMAGE:-ai-novel-server}
+    container_name: ${SERVER_IMAGE:-ai-novel-server}
+    ports:
+      - "${SERVER_PORT:-4000}:4000"
+    environment:
+      NODE_ENV: development
+      PORT: ${SERVER_PORT:-4000}
+      MONGO_URI: ${MONGODB_URI:-mongodb://admin:changeme@mongo:27017/ai_novel_writer?authSource=admin}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://admin:changeme@mongo:27017/ai_novel_writer?authSource=admin}
+      JWT_SECRET: ${JWT_SECRET:-please-change-me}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN:-http://localhost:5173}
+      OPENAI_KEY_SECRET: ${OPENAI_KEY_SECRET:-please-change-me}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_KEY_ALIAS: ${OPENAI_API_KEY_ALIAS:-default}
+      OPENAI_DEFAULT_MODEL: ${OPENAI_DEFAULT_MODEL:-gpt-4o-mini}
+      OPENAI_CHAPTER_MODEL: ${OPENAI_CHAPTER_MODEL:-}
+      OPENAI_MEMORY_MODEL: ${OPENAI_MEMORY_MODEL:-}
+      OPENAI_PLOT_MODEL: ${OPENAI_PLOT_MODEL:-}
+      OPENAI_COST_PER_1K_TOKENS: ${OPENAI_COST_PER_1K_TOKENS:-0.002}
+      OPENAI_RATE_LIMIT_PER_MINUTE: ${OPENAI_RATE_LIMIT_PER_MINUTE:-60}
+      OPENAI_RATE_LIMIT_WINDOW_MS: ${OPENAI_RATE_LIMIT_WINDOW_MS:-60000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./server:/app
+      - server-node-modules:/app/node_modules
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:4000/health').then(r=>{if(!r.ok){process.exit(1);}process.exit(0);}).catch(()=>process.exit(1));\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+      target: development
+    image: ${CLIENT_IMAGE:-ai-novel-client}
+    container_name: ${CLIENT_IMAGE:-ai-novel-client}
+    ports:
+      - "${CLIENT_PORT:-5173}:5173"
+    environment:
+      NODE_ENV: development
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:4000}
+      VITE_APP_NAME: ${VITE_APP_NAME:-AI小说创作平台}
+      VITE_APP_ENV: ${VITE_APP_ENV:-development}
+      VITE_DEFAULT_PROJECT_ID: ${VITE_DEFAULT_PROJECT_ID:-}
+    volumes:
+      - ./client:/app
+      - client-node-modules:/app/node_modules
+    depends_on:
+      server:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
