@@ -8,15 +8,29 @@ export interface MemoryReference {
   addedAt?: Date;
 }
 
+export interface MemoryConflictNote {
+  content: string;
+  source?: string;
+  chapterId?: Types.ObjectId;
+  chapterLabel?: string;
+  recordedAt?: Date;
+}
+
 export interface Memory {
   project: Types.ObjectId;
   key: string;
+  canonicalKey: string;
   type: MemoryType;
   content: string;
   weight: number;
   refs: MemoryReference[];
   category?: string | null;
   metadata?: Record<string, unknown> | null;
+  characterIds?: Types.ObjectId[];
+  characterStateChange?: string | null;
+  worldRuleChange?: string | null;
+  conflict?: boolean;
+  conflictNotes?: MemoryConflictNote[] | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -32,10 +46,22 @@ const MemoryReferenceSchema = new Schema<MemoryReference>(
   { _id: false }
 );
 
+const MemoryConflictNoteSchema = new Schema<MemoryConflictNote>(
+  {
+    content: { type: String, required: true },
+    source: { type: String },
+    chapterId: { type: Schema.Types.ObjectId, ref: 'Chapter' },
+    chapterLabel: { type: String },
+    recordedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const MemorySchema = new Schema<Memory>(
   {
     project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
     key: { type: String, required: true },
+    canonicalKey: { type: String, required: true, index: true, default: '' },
     type: {
       type: String,
       required: true,
@@ -46,6 +72,11 @@ const MemorySchema = new Schema<Memory>(
     refs: { type: [MemoryReferenceSchema], default: [] },
     category: { type: String },
     metadata: { type: Schema.Types.Mixed },
+    characterIds: { type: [Schema.Types.ObjectId], ref: 'Character', default: [] },
+    characterStateChange: { type: String },
+    worldRuleChange: { type: String },
+    conflict: { type: Boolean, default: false },
+    conflictNotes: { type: [MemoryConflictNoteSchema], default: [] },
   },
   { timestamps: true }
 );

@@ -22,7 +22,7 @@ import {
   listCharacters,
   updateCharacter,
 } from '../controllers/characterController';
-import { getProjectMemory, syncProjectMemory } from '../controllers/memoryController';
+import { getProjectMemory, getProjectMemoryConflicts, syncProjectMemory } from '../controllers/memoryController';
 import { cancelStreamJob, streamJob } from '../controllers/streamController';
 import {
   createPlotArc,
@@ -143,6 +143,7 @@ router.post(
 );
 
 router.get('/projects/:projectId/memory', getProjectMemory);
+router.get('/projects/:projectId/memory/conflicts', getProjectMemoryConflicts);
 router.post(
   '/projects/:projectId/memory/sync',
   validateBody(memorySyncSchema),

@@ -1,7 +1,9 @@
 import { Types } from 'mongoose';
-import MemoryModel, { MemoryReference, MemoryType } from '../models/Memory';
+import { Logger } from 'pino';
+import MemoryModel, { MemoryConflictNote, MemoryDocument, MemoryReference, MemoryType } from '../models/Memory';
 import OpenAIService, { MemoryExtractionOptions } from './openai';
 import { PromptMemoryFragment } from '../utils/promptTemplates';
+import baseLogger from '../utils/logger';
 
 const MAX_ITEMS_PER_SYNC = 32;
 const MAX_KEY_LENGTH = 120;
@@ -61,6 +63,10 @@ export interface MemorySyncItemInput {
   refs?: MemoryRefInput[];
   category?: string;
   metadata?: Record<string, unknown>;
+  characterIds?: Array<string | Types.ObjectId>;
+  characterStateChange?: string;
+  worldRuleChange?: string;
+  updatedAt?: string;
 }
 
 export interface MemorySyncOptions {
@@ -74,6 +80,7 @@ export interface MemorySyncOptions {
 export interface MemorySyncResult {
   created: number;
   updated: number;
+  conflicts: number;
   total: number;
 }
 
@@ -89,24 +96,34 @@ export interface MemoryExtractionContext {
 
 type NormalisedMemoryItem = {
   key: string;
+  canonicalKey: string;
   type: MemoryType;
   content: string;
   weight: number;
   refs: MemoryReference[];
   category?: string;
   metadata?: Record<string, unknown> | null;
+  characterIds: Types.ObjectId[];
+  characterStateChange?: string | null;
+  worldRuleChange?: string | null;
 };
 
 type MemoryDocumentLean = {
   _id: Types.ObjectId;
   project: Types.ObjectId;
   key: string;
+  canonicalKey: string;
   type: MemoryType;
   content: string;
   weight: number;
   refs: MemoryReference[];
   category?: string | null;
   metadata?: Record<string, unknown> | null;
+  characterIds?: Types.ObjectId[];
+  characterStateChange?: string | null;
+  worldRuleChange?: string | null;
+  conflict?: boolean;
+  conflictNotes?: MemoryConflictNote[] | null;
   createdAt?: Date;
   updatedAt?: Date;
 };
@@ -116,9 +133,12 @@ class MemoryService {
 
   private maxItems: number;
 
-  constructor({ openAIService, maxItems }: { openAIService?: OpenAIService; maxItems?: number } = {}) {
+  private logger: Logger;
+
+  constructor({ openAIService, maxItems, logger }: { openAIService?: OpenAIService; maxItems?: number; logger?: Logger } = {}) {
     this.openAI = openAIService ?? new OpenAIService();
     this.maxItems = maxItems ?? MAX_ITEMS_PER_SYNC;
+    this.logger = logger ?? baseLogger.child({ module: 'memory-service' });
   }
 
   async syncMemory(options: MemorySyncOptions): Promise<MemorySyncResult> {
@@ -130,24 +150,43 @@ class MemoryService {
     const payload = options.items?.slice(0, this.maxItems) ?? [];
     const normalised = this.normaliseItems(payload, chapterId, chapterLabel, source);
     if (!normalised.length) {
-      return { created: 0, updated: 0, total: 0 };
+      return { created: 0, updated: 0, conflicts: 0, total: 0 };
     }
 
+    const cache = new Map<MemoryType, MemoryDocument[]>();
     let created = 0;
     let updated = 0;
+    let conflicts = 0;
 
     for (const item of normalised) {
-      const result = await this.upsertItem(projectId, item);
-      if (result === 'created') {
+      const documents = await this.getCachedMemories(projectId, item.type, cache);
+      const { outcome, document } = await this.upsertItem(projectId, item, documents);
+      if (outcome === 'created') {
         created += 1;
+        documents.push(document);
       } else {
         updated += 1;
+        if (outcome === 'conflict') {
+          conflicts += 1;
+        }
       }
     }
+
+    this.logger.info(
+      {
+        projectId: projectId.toString(),
+        created,
+        merged: updated,
+        conflicts,
+        processed: normalised.length,
+      },
+      'memory-sync-completed'
+    );
 
     return {
       created,
       updated,
+      conflicts,
       total: created + updated,
     };
   }
@@ -155,7 +194,7 @@ class MemoryService {
   async syncFromChapter(context: MemoryExtractionContext): Promise<{ extracted: number } & MemorySyncResult> {
     const { chapterContent } = context;
     if (!chapterContent?.trim()) {
-      return { extracted: 0, created: 0, updated: 0, total: 0 };
+      return { extracted: 0, created: 0, updated: 0, conflicts: 0, total: 0 };
     }
 
     const extractionOptions: MemoryExtractionOptions = {
@@ -170,7 +209,7 @@ class MemoryService {
     const parsedItems = this.parseExtractionOutput(extraction.content);
 
     if (!parsedItems.length) {
-      return { extracted: 0, created: 0, updated: 0, total: 0 };
+      return { extracted: 0, created: 0, updated: 0, conflicts: 0, total: 0 };
     }
 
     const syncResult = await this.syncMemory({
@@ -188,9 +227,15 @@ class MemoryService {
     return MemoryModel.find({ project: projectId }).sort({ updatedAt: -1 }).lean<MemoryDocumentLean[]>();
   }
 
+  async getProjectConflicts(projectId: Types.ObjectId): Promise<MemoryDocumentLean[]> {
+    return MemoryModel.find({ project: projectId, conflict: true })
+      .sort({ updatedAt: -1 })
+      .lean<MemoryDocumentLean[]>();
+  }
+
   async getPromptFragments(projectId: Types.ObjectId, limit = 36): Promise<PromptMemoryFragment[]> {
     const docs = await MemoryModel.find({ project: projectId })
-      .sort({ weight: -1, updatedAt: -1 })
+      .sort({ conflict: 1, weight: -1, updatedAt: -1 })
       .limit(limit)
       .lean<MemoryDocumentLean[]>();
 
@@ -207,6 +252,21 @@ class MemoryService {
     return docs.map((doc) => this.toPromptFragment(doc));
   }
 
+  private async getCachedMemories(
+    projectId: Types.ObjectId,
+    type: MemoryType,
+    cache: Map<MemoryType, MemoryDocument[]>
+  ): Promise<MemoryDocument[]> {
+    const cached = cache.get(type);
+    if (cached) {
+      return cached;
+    }
+
+    const docs = await MemoryModel.find({ project: projectId, type }).sort({ updatedAt: -1, createdAt: -1 });
+    cache.set(type, docs);
+    return docs;
+  }
+
   private normaliseItems(
     items: MemorySyncItemInput[],
     chapterId?: Types.ObjectId,
@@ -221,7 +281,7 @@ class MemoryService {
         return;
       }
 
-      const mapKey = `${normalised.type}::${normalised.key}`;
+      const mapKey = `${normalised.type}::${normalised.canonicalKey}`;
       const existing = result.get(mapKey);
       if (!existing) {
         result.set(mapKey, normalised);
@@ -230,9 +290,11 @@ class MemoryService {
 
       existing.weight = this.mergeWeight(existing.weight, normalised.weight);
 
-      if (normalised.content !== existing.content) {
+      if (normalised.content.length > existing.content.length) {
         existing.content = normalised.content;
       }
+
+      existing.key = this.pickPreferredKey(existing.key, normalised.key);
 
       if (normalised.category) {
         existing.category = normalised.category;
@@ -242,8 +304,16 @@ class MemoryService {
         existing.metadata = { ...(existing.metadata ?? {}), ...normalised.metadata };
       }
 
-      const refs = this.mergeRefs(existing.refs, normalised.refs);
-      existing.refs = refs;
+      existing.refs = this.mergeRefs(existing.refs, normalised.refs);
+      existing.characterIds = this.mergeCharacterIds(existing.characterIds, normalised.characterIds);
+
+      if (normalised.characterStateChange) {
+        existing.characterStateChange = normalised.characterStateChange;
+      }
+
+      if (normalised.worldRuleChange) {
+        existing.worldRuleChange = normalised.worldRuleChange;
+      }
     });
 
     return Array.from(result.values()).slice(0, this.maxItems);
@@ -268,17 +338,23 @@ class MemoryService {
       return null;
     }
 
+    const canonicalKey = this.buildCanonicalKey(key);
     const refs = this.normaliseRefs(item.refs ?? [], chapterId, chapterLabel);
     const metadata = this.buildMetadata(item.metadata, source);
+    const characterIds = this.normaliseCharacterIds(item.characterIds);
 
     return {
       key,
+      canonicalKey,
       type,
       content,
       weight: this.normaliseWeight(item.weight),
       refs,
       category: this.sanitiseCategory(item.category),
       metadata,
+      characterIds,
+      characterStateChange: this.sanitiseOptionalContent(item.characterStateChange),
+      worldRuleChange: this.sanitiseOptionalContent(item.worldRuleChange),
     };
   }
 
@@ -321,6 +397,40 @@ class MemoryService {
     return refs.slice(0, MAX_REFS_PER_ITEM);
   }
 
+  private mergeCharacterIds(existing: Types.ObjectId[], incoming: Types.ObjectId[]): Types.ObjectId[] {
+    const seen = new Set<string>();
+    const result: Types.ObjectId[] = [];
+    [...incoming, ...existing].forEach((id) => {
+      if (!id) {
+        return;
+      }
+      const key = id.toString();
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      result.push(id);
+    });
+    return result;
+  }
+
+  private hasCharacterDiff(a: Types.ObjectId[], b: Types.ObjectId[]): boolean {
+    if (a.length !== b.length) {
+      return true;
+    }
+    return a.some((id, index) => id.toString() !== b[index].toString());
+  }
+
+  private pickPreferredKey(current: string, incoming: string): string {
+    if (!current) {
+      return incoming;
+    }
+    if (!incoming) {
+      return current;
+    }
+    return incoming.length <= current.length ? incoming : current;
+  }
+
   private sanitiseKey(value: string): string {
     const cleaned = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
     if (!cleaned) {
@@ -332,6 +442,16 @@ class MemoryService {
     return `${cleaned.slice(0, MAX_KEY_LENGTH - 1)}…`;
   }
 
+  private buildCanonicalKey(value: string): string {
+    let normalised = value;
+    try {
+      normalised = value.normalize('NFKC');
+    } catch (_error) {
+      normalised = value;
+    }
+    return normalised.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  }
+
   private sanitiseContent(value: string): string {
     const cleaned = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (!cleaned) {
@@ -341,6 +461,20 @@ class MemoryService {
       return cleaned;
     }
     return `${cleaned.slice(0, MAX_CONTENT_LENGTH - 1)}…`;
+  }
+
+  private sanitiseOptionalContent(value?: string | null, limit = 240): string | null {
+    if (!value || typeof value !== 'string') {
+      return null;
+    }
+    const cleaned = value.replace(/\s+/g, ' ').trim();
+    if (!cleaned) {
+      return null;
+    }
+    if (cleaned.length <= limit) {
+      return cleaned;
+    }
+    return `${cleaned.slice(0, limit - 1)}…`;
   }
 
   private sanitiseCategory(value?: string): string | undefined {
@@ -376,6 +510,27 @@ class MemoryService {
     });
 
     return result.slice(0, MAX_REFS_PER_ITEM);
+  }
+
+  private normaliseCharacterIds(values?: Array<string | Types.ObjectId | null | undefined>): Types.ObjectId[] {
+    if (!values?.length) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const result: Types.ObjectId[] = [];
+    values.forEach((value) => {
+      const objectId = this.toObjectId(value as string | Types.ObjectId | undefined);
+      if (!objectId) {
+        return;
+      }
+      const key = objectId.toString();
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      result.push(objectId);
+    });
+    return result;
   }
 
   private sanitiseRefLabel(label?: string): string | undefined {
@@ -551,6 +706,9 @@ class MemoryService {
       refs: this.extractRefs(record.refs ?? record.references),
       category: (record.category as string) ?? fallbackCategory,
       metadata: this.extractMetadata(record),
+      characterIds: this.extractCharacterIds(record.characterIds ?? record.characters ?? record.characterRefs),
+      characterStateChange: this.extractStateChange(record),
+      worldRuleChange: this.extractWorldRuleChange(record),
     };
   }
 
@@ -594,6 +752,50 @@ class MemoryService {
     return undefined;
   }
 
+  private extractCharacterIds(raw: unknown): string[] | undefined {
+    if (!raw) {
+      return undefined;
+    }
+    const candidates = Array.isArray(raw) ? raw : [raw];
+    const result: string[] = [];
+    candidates.forEach((candidate) => {
+      if (typeof candidate === 'string' && Types.ObjectId.isValid(candidate.trim())) {
+        result.push(candidate.trim());
+        return;
+      }
+      if (candidate && typeof candidate === 'object') {
+        const record = candidate as Record<string, unknown>;
+        const value = record.id ?? record.characterId ?? record._id;
+        if (typeof value === 'string' && Types.ObjectId.isValid(value.trim())) {
+          result.push(value.trim());
+        }
+      }
+    });
+    return result.length ? Array.from(new Set(result)) : undefined;
+  }
+
+  private extractStateChange(record: Record<string, unknown>): string | undefined {
+    const keys = ['characterStateChange', 'characterStatusChange', 'stateChange', 'characterState'];
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+    return undefined;
+  }
+
+  private extractWorldRuleChange(record: Record<string, unknown>): string | undefined {
+    const keys = ['worldRuleChange', 'worldChange', 'ruleChange', 'worldRule'];
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+    return undefined;
+  }
+
   private extractWeight(value: unknown): number | undefined {
     if (typeof value !== 'number' || Number.isNaN(value)) {
       return undefined;
@@ -609,6 +811,9 @@ class MemoryService {
     if (record.reason !== undefined) {
       metadata.reason = record.reason;
     }
+    if (typeof record.source === 'string' && record.source.trim()) {
+      metadata.source = record.source.trim();
+    }
     return Object.keys(metadata).length ? metadata : undefined;
   }
 
@@ -623,39 +828,125 @@ class MemoryService {
     return Object.keys(base).length ? base : null;
   }
 
-  private async upsertItem(projectId: Types.ObjectId, item: NormalisedMemoryItem): Promise<'created' | 'updated'> {
-    const existing = await MemoryModel.findOne({ project: projectId, type: item.type, key: item.key });
+  private getDocumentCanonical(doc: { canonicalKey?: string; key: string }): string {
+    if (doc.canonicalKey && typeof doc.canonicalKey === 'string' && doc.canonicalKey.trim()) {
+      return doc.canonicalKey.trim();
+    }
+    return this.buildCanonicalKey(doc.key);
+  }
+
+  private findMatchingMemory(existingDocs: MemoryDocument[], incoming: NormalisedMemoryItem): MemoryDocument | undefined {
+    const targetCanonical = incoming.canonicalKey;
+    const exact = existingDocs.find((doc) => this.getDocumentCanonical(doc) === targetCanonical);
+    if (exact) {
+      return exact;
+    }
+
+    return existingDocs.find((doc) => {
+      const docCanonical = this.getDocumentCanonical(doc);
+      return docCanonical.startsWith(targetCanonical) || targetCanonical.startsWith(docCanonical);
+    });
+  }
+
+  private hasConflictNote(notes: MemoryConflictNote[] | null | undefined, content: string): boolean {
+    if (!notes?.length) {
+      return false;
+    }
+    return notes.some((note) => note.content === content);
+  }
+
+  private resolvePrimaryRef(refs: MemoryReference[]): MemoryReference | undefined {
+    if (!refs?.length) {
+      return undefined;
+    }
+    return [...refs].sort((a, b) => {
+      const timeA = a.addedAt instanceof Date ? a.addedAt.getTime() : 0;
+      const timeB = b.addedAt instanceof Date ? b.addedAt.getTime() : 0;
+      return timeB - timeA;
+    })[0];
+  }
+
+  private resolveMetadataSource(metadata?: Record<string, unknown> | null): string | undefined {
+    if (!metadata || typeof metadata !== 'object') {
+      return undefined;
+    }
+    const source = (metadata as Record<string, unknown>).source;
+    return typeof source === 'string' && source.trim() ? source.trim() : undefined;
+  }
+
+  private buildConflictNote(content: string, refs: MemoryReference[], source?: string): MemoryConflictNote {
+    const primaryRef = this.resolvePrimaryRef(refs);
+    return {
+      content,
+      source,
+      chapterId: primaryRef?.chapterId,
+      chapterLabel: primaryRef?.label,
+      recordedAt: new Date(),
+    };
+  }
+
+  private registerConflict(
+    existing: MemoryDocument,
+    previousContent: string,
+    previousRefs: MemoryReference[],
+    incoming: NormalisedMemoryItem
+  ): void {
+    if (!previousContent || previousContent === incoming.content) {
+      return;
+    }
+
+    const notes = existing.conflictNotes ?? [];
+    if (!this.hasConflictNote(notes, previousContent)) {
+      const source = this.resolveMetadataSource(existing.metadata) ?? 'history';
+      const note = this.buildConflictNote(previousContent, previousRefs, source);
+      existing.conflictNotes = [...notes, note];
+      existing.markModified('conflictNotes');
+    }
+
+    existing.conflict = true;
+    existing.content = incoming.content;
+  }
+
+  private async upsertItem(
+    projectId: Types.ObjectId,
+    item: NormalisedMemoryItem,
+    existingDocs: MemoryDocument[]
+  ): Promise<{ outcome: 'created' | 'updated' | 'conflict'; document: MemoryDocument }> {
+    let existing = this.findMatchingMemory(existingDocs, item);
+
     if (!existing) {
-      await MemoryModel.create({
+      const created = await MemoryModel.create({
         project: projectId,
         key: item.key,
+        canonicalKey: item.canonicalKey,
         type: item.type,
         content: item.content,
         weight: item.weight,
         refs: item.refs,
         category: item.category,
         metadata: item.metadata ?? undefined,
+        characterIds: item.characterIds,
+        characterStateChange: item.characterStateChange ?? undefined,
+        worldRuleChange: item.worldRuleChange ?? undefined,
+        conflict: false,
       });
-      return 'created';
+      return { outcome: 'created', document: created };
     }
 
     let changed = false;
+    let outcome: 'updated' | 'conflict' = 'updated';
 
-    if (existing.content !== item.content) {
-      existing.content = item.content;
+    const previousContent = existing.content || '';
+    const previousRefs = existing.refs ? [...existing.refs] : [];
+
+    const preferredKey = this.pickPreferredKey(existing.key, item.key);
+    if (preferredKey !== existing.key) {
+      existing.key = preferredKey;
       changed = true;
     }
 
-    const newWeight = this.mergeWeight(existing.weight ?? 0.6, item.weight);
-    if (Math.abs(newWeight - (existing.weight ?? 0.6)) > 0.0005) {
-      existing.weight = newWeight;
-      changed = true;
-    }
-
-    const mergedRefs = this.mergeRefs(existing.refs ?? [], item.refs);
-    if (mergedRefs.length !== (existing.refs ?? []).length || this.hasRefDiff(existing.refs ?? [], mergedRefs)) {
-      existing.refs = mergedRefs;
-      existing.markModified('refs');
+    if (existing.canonicalKey !== item.canonicalKey) {
+      existing.canonicalKey = item.canonicalKey;
       changed = true;
     }
 
@@ -669,12 +960,49 @@ class MemoryService {
       changed = true;
     }
 
-    if (!changed) {
+    const mergedRefs = this.mergeRefs(existing.refs ?? [], item.refs);
+    if (this.hasRefDiff(existing.refs ?? [], mergedRefs)) {
+      existing.refs = mergedRefs;
+      existing.markModified('refs');
+      changed = true;
+    }
+
+    const mergedCharacters = this.mergeCharacterIds(existing.characterIds ?? [], item.characterIds);
+    if (this.hasCharacterDiff(existing.characterIds ?? [], mergedCharacters)) {
+      existing.characterIds = mergedCharacters;
+      existing.markModified('characterIds');
+      changed = true;
+    }
+
+    if (item.characterStateChange && item.characterStateChange !== existing.characterStateChange) {
+      existing.characterStateChange = item.characterStateChange;
+      changed = true;
+    }
+
+    if (item.worldRuleChange && item.worldRuleChange !== existing.worldRuleChange) {
+      existing.worldRuleChange = item.worldRuleChange;
+      changed = true;
+    }
+
+    const newWeight = this.mergeWeight(existing.weight ?? 0.6, item.weight);
+    if (Math.abs(newWeight - (existing.weight ?? 0.6)) > 0.0005) {
+      existing.weight = newWeight;
+      changed = true;
+    }
+
+    if (item.content !== previousContent) {
+      this.registerConflict(existing, previousContent, previousRefs, item);
+      outcome = 'conflict';
+      changed = true;
+    }
+
+    if (outcome === 'updated' && !changed) {
       existing.updatedAt = new Date();
     }
 
     await existing.save();
-    return 'updated';
+
+    return { outcome, document: existing };
   }
 
   private hasRefDiff(a: MemoryReference[], b: MemoryReference[]): boolean {
@@ -691,12 +1019,42 @@ class MemoryService {
   }
 
   private toPromptFragment(doc: MemoryDocumentLean): PromptMemoryFragment {
-    return {
+    const fragment: PromptMemoryFragment = {
       label: `【${TYPE_LABEL_MAP[doc.type]}】${doc.key}`,
       content: doc.content,
       type: doc.type,
       strength: this.weightToStrength(doc.weight),
     };
+
+    if (doc.characterStateChange) {
+      fragment.characterStateChange = doc.characterStateChange;
+    }
+    if (doc.worldRuleChange) {
+      fragment.worldRuleChange = doc.worldRuleChange;
+    }
+    if (doc.characterIds?.length) {
+      fragment.characterIds = doc.characterIds.map((id) => id.toString());
+    }
+
+    const primaryRef = this.resolvePrimaryRef(doc.refs ?? []);
+    if (primaryRef?.label) {
+      fragment.primaryReference = primaryRef.label;
+    }
+
+    if (doc.conflict) {
+      fragment.conflict = true;
+      const notes = doc.conflictNotes ?? [];
+      if (notes.length) {
+        fragment.conflictNotes = notes.map((note) => {
+          if (note.chapterLabel) {
+            return `${note.chapterLabel}：${note.content}`;
+          }
+          return note.content;
+        });
+      }
+    }
+
+    return fragment;
   }
 
   private weightToStrength(weight: number): string | undefined {
