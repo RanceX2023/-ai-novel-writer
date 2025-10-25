@@ -310,7 +310,8 @@ const ProjectEditorPage = () => {
       startTimeRef.current = Date.now();
       setStreamState({ mode, status: 'streaming', jobId, progress: 0, tokens: 0 });
 
-      const source = new EventSource(`${API_BASE}/api/stream/${jobId}`);
+      const streamUrl = `${API_BASE}/api/stream/${jobId}`;
+      const source = new EventSource(streamUrl, { withCredentials: true });
       eventSourceRef.current = source;
 
       source.addEventListener('start', () => {
