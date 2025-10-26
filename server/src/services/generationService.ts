@@ -13,6 +13,7 @@ import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
 import { appConfig } from '../config/appConfig';
+import runtimeConfigInstance, { EffectiveRuntimeConfig } from '../config/runtimeConfig';
 import { chapterMetaJsonSchema, chapterMetaSchema, ChapterMeta } from '../validators/chapterMeta';
 import {
   buildChapterMetaPrompt,
@@ -25,7 +26,7 @@ import baseLogger from '../utils/logger';
 import { jsonrepair } from 'jsonrepair';
 import { ZodError } from 'zod';
 
-const HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const TARGET_PARAGRAPH_TOKEN_ESTIMATE = 80;
 const CHARACTER_TOKEN_RATIO = 3.2;
 
@@ -57,6 +58,18 @@ type MemoryFragmentInput =
 type GenerationRequestOptions = {
   runtimeApiKey?: string;
 };
+
+interface RuntimeConfigProvider {
+  getEffectiveConfig(): EffectiveRuntimeConfig;
+  on(event: 'update', listener: (config: EffectiveRuntimeConfig) => void): unknown;
+}
+
+interface GenerationServiceOptions {
+  openAIService?: OpenAIService;
+  memoryService?: MemoryService;
+  logger?: Logger;
+  runtimeConfig?: RuntimeConfigProvider;
+}
 
 interface SseSubscription {
   res: Response;
@@ -90,28 +103,47 @@ class GenerationService {
 
   private allowedModels: Set<string>;
 
+  private configProvider: RuntimeConfigProvider;
+
+  private heartbeatIntervalMs: number;
+
+  private generationMaxChars: number;
+
+  private styleStrengthMax: number;
+
   private logger: Logger;
 
   constructor({
     openAIService,
     memoryService,
     logger,
-  }: {
-    openAIService?: OpenAIService;
-    memoryService?: MemoryService;
-    logger?: Logger;
-  } = {}) {
-    this.openAI = openAIService ?? new OpenAIService();
+    runtimeConfig,
+  }: GenerationServiceOptions = {}) {
+    this.configProvider = runtimeConfig ?? runtimeConfigInstance;
+    this.openAI = openAIService ?? new OpenAIService({ runtimeConfig: this.configProvider });
     this.memoryService = memoryService;
     this.streamSubscriptions = new Map();
     this.jobControllers = new Map();
     this.cancelledJobReasons = new Map();
     this.disconnectTimers = new Map();
     this.disconnectGraceMs = Math.max(0, Number(process.env.GENERATION_STREAM_DISCONNECT_GRACE_MS ?? 0));
-    this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
+    this.costPer1KTokens = appConfig.metrics.costPer1KTokens;
     this.logger = logger ?? baseLogger.child({ module: 'generation-service' });
-    this.defaultModel = appConfig.openai.defaultModel;
-    this.allowedModels = new Set(appConfig.openai.allowedModels);
+
+    const effectiveConfig = this.configProvider.getEffectiveConfig();
+    this.applyRuntimeConfig(effectiveConfig);
+
+    this.configProvider.on('update', (config) => {
+      this.applyRuntimeConfig(config);
+    });
+  }
+
+  private applyRuntimeConfig(config: EffectiveRuntimeConfig): void {
+    this.defaultModel = config.defaultModel;
+    this.allowedModels = new Set(config.allowedModels);
+    this.heartbeatIntervalMs = config.sseHeartbeatMs || DEFAULT_HEARTBEAT_INTERVAL_MS;
+    this.generationMaxChars = config.generation.maxChars;
+    this.styleStrengthMax = config.generation.styleStrengthMax;
   }
 
   registerStream(jobId: string, res: Response): void {
@@ -123,7 +155,7 @@ class GenerationService {
       if (!res.writableEnded) {
         res.write('event: heartbeat\ndata: {}\n\n');
       }
-    }, HEARTBEAT_INTERVAL_MS);
+    }, this.heartbeatIntervalMs || DEFAULT_HEARTBEAT_INTERVAL_MS);
 
     const subscription: SseSubscription = { res, heartbeat };
     const subscribers = this.streamSubscriptions.get(jobId)!;

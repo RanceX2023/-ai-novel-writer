@@ -7,6 +7,7 @@ import OpenAIKeyManager from './apiKeyManager';
 import OpenAIRateLimiter from './rateLimiter';
 import { buildChapterPrompt, ChapterPromptOptions } from '../../utils/promptTemplates';
 import { appConfig } from '../../config/appConfig';
+import runtimeConfigInstance, { EffectiveRuntimeConfig } from '../../config/runtimeConfig';
 
 export interface UsageRecord {
   promptTokens: number;
@@ -120,6 +121,11 @@ export interface OpenAIClient {
 
 export type ClientFactory = (apiKey: string) => OpenAIClient;
 
+interface RuntimeConfigProvider {
+  getEffectiveConfig(): EffectiveRuntimeConfig;
+  on(event: 'update', listener: (config: EffectiveRuntimeConfig) => void): unknown;
+}
+
 export interface OpenAIServiceOptions {
   keyManager?: OpenAIKeyManager;
   rateLimiter?: OpenAIRateLimiter;
@@ -128,6 +134,7 @@ export interface OpenAIServiceOptions {
   defaultModel?: string;
   baseUrl?: string;
   allowRuntimeKeyOverride?: boolean;
+  runtimeConfig?: RuntimeConfigProvider;
 }
 
 export interface RequestContextOptions {
@@ -143,6 +150,16 @@ class OpenAIService {
 
   private clientFactory: ClientFactory;
 
+  private configProvider: RuntimeConfigProvider;
+
+  private customDefaultModel: boolean;
+
+  private customAllowRuntimeKeyOverride: boolean;
+
+  private customBaseUrl: boolean;
+
+  private customRateLimiter: boolean;
+
   private baseUrl?: string;
 
   private defaultModel: string;
@@ -157,13 +174,44 @@ class OpenAIService {
     defaultModel,
     baseUrl,
     allowRuntimeKeyOverride,
+    runtimeConfig,
   }: OpenAIServiceOptions = {}) {
     this.keyManager = keyManager || new OpenAIKeyManager();
-    this.rateLimiter = rateLimiter || new OpenAIRateLimiter();
     this.usageModel = usageModel;
-    this.baseUrl = baseUrl ?? appConfig.openai.baseUrl;
-    this.defaultModel = defaultModel || appConfig.openai.defaultModel;
-    this.allowRuntimeKeyOverride = allowRuntimeKeyOverride ?? appConfig.openai.allowRuntimeKeyOverride;
+
+    this.configProvider = runtimeConfig ?? runtimeConfigInstance;
+    const effectiveConfig = this.configProvider.getEffectiveConfig();
+
+    this.customDefaultModel = typeof defaultModel === 'string' && defaultModel.trim().length > 0;
+    this.customAllowRuntimeKeyOverride = typeof allowRuntimeKeyOverride === 'boolean';
+    const trimmedBaseUrl = typeof baseUrl === 'string' ? baseUrl.trim() : undefined;
+    this.customBaseUrl = Boolean(trimmedBaseUrl);
+    this.customRateLimiter = Boolean(rateLimiter);
+
+    this.defaultModel = this.customDefaultModel
+      ? (defaultModel?.trim() || effectiveConfig.defaultModel)
+      : effectiveConfig.defaultModel;
+
+    this.allowRuntimeKeyOverride = this.customAllowRuntimeKeyOverride
+      ? Boolean(allowRuntimeKeyOverride)
+      : effectiveConfig.allowRuntimeKeyOverride;
+
+    this.baseUrl = this.customBaseUrl
+      ? trimmedBaseUrl
+      : effectiveConfig.openaiBaseUrl ?? appConfig.openai.baseUrl;
+
+    this.rateLimiter = rateLimiter || new OpenAIRateLimiter({
+      limitPerWindow: effectiveConfig.rateLimit.max,
+      windowMs: effectiveConfig.rateLimit.windowMs,
+    });
+
+    if (!this.customRateLimiter) {
+      this.rateLimiter.updateLimits({
+        limitPerWindow: effectiveConfig.rateLimit.max,
+        windowMs: effectiveConfig.rateLimit.windowMs,
+      });
+    }
+
     this.clientFactory = clientFactory
       || ((apiKey: string) => {
         const options: Record<string, unknown> = { apiKey };
@@ -172,7 +220,29 @@ class OpenAIService {
         }
         return new OpenAI(options) as unknown as OpenAIClient;
       });
+
+    this.configProvider.on('update', (config) => {
+      this.handleRuntimeConfigUpdate(config);
+    });
   }
+
+  private handleRuntimeConfigUpdate = (config: EffectiveRuntimeConfig): void => {
+    if (!this.customDefaultModel) {
+      this.defaultModel = config.defaultModel;
+    }
+    if (!this.customAllowRuntimeKeyOverride) {
+      this.allowRuntimeKeyOverride = config.allowRuntimeKeyOverride;
+    }
+    if (!this.customBaseUrl) {
+      this.baseUrl = config.openaiBaseUrl ?? appConfig.openai.baseUrl;
+    }
+    if (!this.customRateLimiter) {
+      this.rateLimiter.updateLimits({
+        limitPerWindow: config.rateLimit.max,
+        windowMs: config.rateLimit.windowMs,
+      });
+    }
+  };
 
   private normaliseUsage(usage?: ChatCompletionStreamChunk['usage']): UsageRecord | undefined {
     if (!usage) {

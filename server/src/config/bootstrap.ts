@@ -2,11 +2,17 @@ import OpenAIApiKeyModel from '../models/OpenAIApiKey';
 import OpenAIKeyManager from '../services/openai/apiKeyManager';
 import logger from '../utils/logger';
 import { appConfig } from './appConfig';
+import runtimeConfig from './runtimeConfig';
 
 export async function initialiseOpenAIKeys(): Promise<void> {
-  const secret = process.env.OPENAI_KEY_SECRET;
+  if (!runtimeConfig.canPersistSecrets()) {
+    logger.info('[bootstrap] Runtime configuration disallows secret persistence; skipping OpenAI API key seeding.');
+    return;
+  }
+
+  const secret = appConfig.security.encryptionSecret;
   if (!secret) {
-    logger.warn('[bootstrap] OPENAI_KEY_SECRET is not configured; skipping OpenAI API key initialisation.');
+    logger.warn('[bootstrap] Encryption secret is not configured; skipping OpenAI API key initialisation.');
     return;
   }
 
