@@ -158,4 +158,54 @@ describe('OpenAIService', () => {
     expect(result.content).toBe('runtime override response');
     expect(result.keyDocId).toBeUndefined();
   });
+
+  test('performs connectivity test without recording usage', async () => {
+    const manager = new OpenAIKeyManager({ model: OpenAIApiKey, encryptionSecret: 'unit-test-secret' });
+    const keyDoc = await manager.addKey({ alias: 'connectivity', apiKey: 'sk-test-conn' });
+    const markUsageSpy = jest.spyOn(manager, 'markUsage');
+
+    const rateLimiter = {
+      consume: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const createMock = jest.fn().mockResolvedValue({
+      id: 'chatcmpl-conn',
+      model: 'gpt-verify',
+    });
+
+    const clientFactory = jest.fn((apiKey) => {
+      expect(apiKey).toBe('sk-test-conn');
+      return {
+        chat: {
+          completions: {
+            create: createMock,
+          },
+        },
+      };
+    });
+
+    const service = new OpenAIService({
+      keyManager: manager,
+      rateLimiter,
+      clientFactory,
+      defaultModel: 'gpt-verify',
+    });
+
+    const result = await service.testConnection();
+
+    expect(result.model).toBe('gpt-verify');
+    expect(clientFactory).toHaveBeenCalledTimes(1);
+    expect(createMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-verify',
+        max_tokens: 1,
+        temperature: 0,
+      })
+    );
+    expect(rateLimiter.consume).toHaveBeenCalledWith(keyDoc._id);
+    expect(markUsageSpy).not.toHaveBeenCalled();
+    expect(await OpenAIUsage.countDocuments()).toBe(0);
+
+    markUsageSpy.mockRestore();
+  });
 });
