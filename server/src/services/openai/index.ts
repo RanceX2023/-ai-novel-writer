@@ -25,7 +25,7 @@ export interface StreamChapterResult {
   usage?: UsageRecord;
   model: string;
   requestId?: string;
-  keyDocId: Types.ObjectId;
+  keyDocId?: Types.ObjectId;
 }
 
 export interface MemoryExtractionOptions {
@@ -40,7 +40,7 @@ export interface MemoryExtractionResult {
   content: string;
   usage?: UsageRecord;
   model: string;
-  keyDocId: Types.ObjectId;
+  keyDocId?: Types.ObjectId;
 }
 
 type ChatCompletionStreamChunk = {
@@ -100,7 +100,7 @@ export interface ChatCompletionResultData {
   content: string;
   usage?: UsageRecord;
   model: string;
-  keyDocId: Types.ObjectId;
+  keyDocId?: Types.ObjectId;
   requestId?: string;
 }
 
@@ -208,6 +208,7 @@ class OpenAIService {
       return await handler(client, { keyDoc });
     } catch (error) {
       this.handleClientError(error);
+      throw error instanceof Error ? error : new Error('OpenAI request failed');
     }
   }
 
@@ -315,10 +316,13 @@ class OpenAIService {
     }, requestOptions);
   }
 
-  async completeChat(options: ChatCompletionOptions): Promise<ChatCompletionResultData> {
+  async completeChat(
+    options: ChatCompletionOptions,
+    requestOptions: RequestContextOptions = {}
+  ): Promise<ChatCompletionResultData> {
     const model = options.model || this.defaultModel;
 
-    return this.withClient(async (client, keyDoc) => {
+    return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {
         model,
         messages: options.messages,
@@ -349,7 +353,7 @@ class OpenAIService {
       const usage = this.normaliseUsage(response.usage);
       const requestId = response.id;
 
-      if (usage) {
+      if (usage && keyDoc) {
         await Promise.all([
           this.keyManager.markUsage(keyDoc, {
             tokens: usage.totalTokens,
@@ -373,17 +377,20 @@ class OpenAIService {
         content,
         usage,
         model,
-        keyDocId: keyDoc._id,
+        keyDocId: keyDoc ? keyDoc._id : undefined,
         requestId,
       };
-    });
+    }, requestOptions);
   }
 
-  async extractMemory(options: MemoryExtractionOptions): Promise<MemoryExtractionResult> {
+  async extractMemory(
+    options: MemoryExtractionOptions,
+    requestOptions: RequestContextOptions = {}
+  ): Promise<MemoryExtractionResult> {
     const model = process.env.OPENAI_MEMORY_MODEL || process.env.OPENAI_DEFAULT_MODEL || this.defaultModel;
     const messages = this.buildMemoryExtractionMessages(options);
 
-    return this.withClient(async (client, keyDoc) => {
+    return this.withClient(async (client, { keyDoc }) => {
       const params = {
         model,
         temperature: 0.2,
@@ -395,7 +402,7 @@ class OpenAIService {
       const content = response.choices?.[0]?.message?.content ?? '{}';
       const usage = this.normaliseUsage(response.usage);
 
-      if (usage) {
+      if (usage && keyDoc) {
         await Promise.all([
           this.keyManager.markUsage(keyDoc, {
             tokens: usage.totalTokens,
@@ -419,9 +426,9 @@ class OpenAIService {
         content,
         usage,
         model,
-        keyDocId: keyDoc._id,
+        keyDocId: keyDoc ? keyDoc._id : undefined,
       };
-    });
+    }, requestOptions);
   }
 
   private buildMemoryExtractionMessages(options: MemoryExtractionOptions): Array<{

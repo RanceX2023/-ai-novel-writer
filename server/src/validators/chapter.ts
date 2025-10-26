@@ -1,13 +1,9 @@
 import { z } from 'zod';
+import { appConfig } from '../config/appConfig';
 
 const mongoIdRegex = /^[a-f0-9]{24}$/i;
 
-const fallbackModel = process.env.OPENAI_DEFAULT_MODEL?.trim() || 'gpt-4o-mini';
-const allowedModelCandidates = [
-  ...(process.env.OPENAI_ALLOWED_MODELS?.split(',').map((model) => model.trim()) ?? []),
-  fallbackModel,
-].filter(Boolean);
-const allowedModels = Array.from(new Set(allowedModelCandidates));
+const allowedModels = appConfig.openai.allowedModels;
 
 const modelSchema = allowedModels.length
   ? z

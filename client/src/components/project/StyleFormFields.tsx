@@ -4,6 +4,8 @@ import { StyleFormValues } from '../../utils/styleForm';
 interface StyleFormFieldsProps<TFormValues extends StyleFormValues = StyleFormValues> {
   form: UseFormReturn<TFormValues>;
   disabled?: boolean;
+  models?: string[];
+  defaultModel?: string;
 }
 
 const fieldConfigs: Array<{
@@ -26,6 +28,8 @@ const errorTextClass = 'mt-2 text-xs text-rose-400';
 const StyleFormFields = <TFormValues extends StyleFormValues = StyleFormValues>({
   form,
   disabled,
+  models,
+  defaultModel,
 }: StyleFormFieldsProps<TFormValues>) => {
   const {
     register,

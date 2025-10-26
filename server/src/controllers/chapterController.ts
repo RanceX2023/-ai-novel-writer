@@ -363,7 +363,9 @@ export const generateChapter = async (req: Request, res: Response, next: NextFun
     assertObjectId(projectId, 'projectId');
 
     const payload = req.body as ChapterGenerationInput;
-    const job = await getGenerationService(req).createChapterGenerationJob(projectId, payload);
+    const runtimeApiKey = (req.headers['x-openai-key'] as string | undefined)?.trim() || undefined;
+    const generationOptions = runtimeApiKey ? { runtimeApiKey } : {};
+    const job = await getGenerationService(req).createChapterGenerationJob(projectId, payload, generationOptions);
 
     const requestLogger = getRequestLogger(req);
     const requestId = (req as Request & { id?: string }).id;
@@ -399,7 +401,14 @@ export const continueChapter = async (req: Request, res: Response, next: NextFun
     assertObjectId(chapterId, 'chapterId');
 
     const payload = req.body as ChapterContinuationInput;
-    const job = await getGenerationService(req).createChapterContinuationJob(projectId, chapterId, payload);
+    const runtimeApiKey = (req.headers['x-openai-key'] as string | undefined)?.trim() || undefined;
+    const generationOptions = runtimeApiKey ? { runtimeApiKey } : {};
+    const job = await getGenerationService(req).createChapterContinuationJob(
+      projectId,
+      chapterId,
+      payload,
+      generationOptions
+    );
 
     const requestLogger = getRequestLogger(req);
     const requestId = (req as Request & { id?: string }).id;

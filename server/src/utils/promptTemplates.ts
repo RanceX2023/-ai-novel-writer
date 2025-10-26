@@ -14,6 +14,7 @@ export interface PromptStyleProfile {
   voice?: string;
   mood?: string;
   genre?: string;
+  model?: string;
   [key: string]: unknown;
 }
 

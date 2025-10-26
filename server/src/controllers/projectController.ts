@@ -5,6 +5,7 @@ import OutlineNodeModel from '../models/OutlineNode';
 import StyleProfileModel, { StyleProfileAttributes as StoredStyleProfile } from '../models/StyleProfile';
 import ApiError from '../utils/ApiError';
 import { ProjectCreateInput, ProjectStyleInput } from '../validators/project';
+import { appConfig } from '../config/appConfig';
 
 function ensureObjectId(value: string | undefined, label: string): Types.ObjectId {
   if (!value || !Types.ObjectId.isValid(value)) {
@@ -25,6 +26,7 @@ function normaliseStyleProfile(style?: ProjectStyleProfile | null) {
     authors: Array.isArray(style.authors) ? style.authors.filter(Boolean) : [],
     styleStrength: typeof style.styleStrength === 'number' ? style.styleStrength : null,
     language: style.language ?? null,
+    model: style.model ?? null,
     notes: style.notes ?? null,
   };
 }
@@ -94,23 +96,37 @@ export const saveProjectStyle = async (req: Request, res: Response, next: NextFu
       typeof payload.styleStrength === 'number'
         ? Math.min(Math.max(payload.styleStrength, 0), 1)
         : project.styleProfile?.styleStrength;
+    const modelInput = typeof payload.model === 'string' ? payload.model.trim() : '';
+    const selectedModel = modelInput ? modelInput : undefined;
+    if (selectedModel && !appConfig.openai.allowedModels.includes(selectedModel)) {
+      throw new ApiError(400, `model 必须为以下选项之一：${appConfig.openai.allowedModels.join(', ')}`);
+    }
 
-    project.styleProfile = {
+    const language = payload.language?.trim() || '中文';
+    const notes = payload.notes?.trim();
+
+    const styleProfileToSave: ProjectStyleProfile = {
       tone: payload.tone,
       pacing: payload.pacing,
       pov: payload.pov,
       diction: payload.diction,
       authors,
       styleStrength,
-      language: payload.language ?? '中文',
-      notes: payload.notes ?? undefined,
+      language,
+      notes: notes ?? undefined,
       additional: project.styleProfile?.additional ?? undefined,
     };
+
+    if (selectedModel) {
+      styleProfileToSave.model = selectedModel;
+    }
+
+    project.styleProfile = styleProfileToSave;
 
     await project.save();
 
     if (project.styleProfile) {
-      const updatePayload: Partial<StoredStyleProfile> & { project: Types.ObjectId; name: string } = {
+      const setPayload: Partial<StoredStyleProfile> & { project: Types.ObjectId; name: string } = {
         project: projectId,
         name: '默认风格',
         tone: project.styleProfile.tone ?? undefined,
@@ -121,19 +137,27 @@ export const saveProjectStyle = async (req: Request, res: Response, next: NextFu
         language: project.styleProfile.language ?? undefined,
         notes: project.styleProfile.notes ?? undefined,
       };
-      if (typeof project.styleProfile.styleStrength === 'number') {
-        updatePayload.styleStrength = project.styleProfile.styleStrength;
+      if (typeof styleStrength === 'number') {
+        setPayload.styleStrength = styleStrength;
+      }
+      if (selectedModel) {
+        setPayload.model = selectedModel;
       }
 
-      Object.keys(updatePayload).forEach((key) => {
-        if (updatePayload[key as keyof StoredStyleProfile] === undefined) {
-          delete updatePayload[key as keyof StoredStyleProfile];
+      Object.keys(setPayload).forEach((key) => {
+        if (setPayload[key as keyof StoredStyleProfile] === undefined) {
+          delete setPayload[key as keyof StoredStyleProfile];
         }
       });
 
+      const update: Record<string, unknown> = { $set: setPayload };
+      if (!selectedModel) {
+        update.$unset = { model: 1 };
+      }
+
       await StyleProfileModel.findOneAndUpdate(
         { project: projectId, name: '默认风格' },
-        updatePayload,
+        update,
         { upsert: true, new: true, setDefaultsOnInsert: true }
       ).exec();
     }
