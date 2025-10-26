@@ -6,6 +6,7 @@ import { OpenAIApiKeyDocument } from '../../models/OpenAIApiKey';
 import OpenAIKeyManager from './apiKeyManager';
 import OpenAIRateLimiter from './rateLimiter';
 import { buildChapterPrompt, ChapterPromptOptions } from '../../utils/promptTemplates';
+import { appConfig } from '../../config/appConfig';
 
 export interface UsageRecord {
   promptTokens: number;
@@ -119,6 +120,12 @@ export interface OpenAIServiceOptions {
   usageModel?: Model<OpenAIUsage>;
   clientFactory?: ClientFactory;
   defaultModel?: string;
+  baseUrl?: string;
+  allowRuntimeKeyOverride?: boolean;
+}
+
+export interface RequestContextOptions {
+  runtimeApiKey?: string;
 }
 
 class OpenAIService {
@@ -130,7 +137,11 @@ class OpenAIService {
 
   private clientFactory: ClientFactory;
 
+  private baseUrl?: string;
+
   private defaultModel: string;
+
+  private allowRuntimeKeyOverride: boolean;
 
   constructor({
     keyManager,
@@ -138,12 +149,23 @@ class OpenAIService {
     usageModel = OpenAIUsageModel,
     clientFactory,
     defaultModel,
+    baseUrl,
+    allowRuntimeKeyOverride,
   }: OpenAIServiceOptions = {}) {
     this.keyManager = keyManager || new OpenAIKeyManager();
     this.rateLimiter = rateLimiter || new OpenAIRateLimiter();
     this.usageModel = usageModel;
-    this.clientFactory = clientFactory || ((apiKey: string) => new OpenAI({ apiKey }) as unknown as OpenAIClient);
-    this.defaultModel = defaultModel || process.env.OPENAI_DEFAULT_MODEL || 'gpt-4o-mini';
+    this.baseUrl = baseUrl ?? appConfig.openai.baseUrl;
+    this.defaultModel = defaultModel || appConfig.openai.defaultModel;
+    this.allowRuntimeKeyOverride = allowRuntimeKeyOverride ?? appConfig.openai.allowRuntimeKeyOverride;
+    this.clientFactory = clientFactory
+      || ((apiKey: string) => {
+        const options: Record<string, unknown> = { apiKey };
+        if (this.baseUrl) {
+          options.baseURL = this.baseUrl;
+        }
+        return new OpenAI(options) as unknown as OpenAIClient;
+      });
   }
 
   private normaliseUsage(usage?: ChatCompletionStreamChunk['usage']): UsageRecord | undefined {
@@ -158,46 +180,67 @@ class OpenAIService {
   }
 
   private async withClient<T>(
-    handler: (client: OpenAIClient, keyDoc: OpenAIApiKeyDocument) => Promise<T>
+    handler: (client: OpenAIClient, context: { keyDoc: OpenAIApiKeyDocument | null }) => Promise<T>,
+    options: RequestContextOptions = {}
   ): Promise<T> {
+    const overrideKey = options.runtimeApiKey?.trim();
+    if (overrideKey) {
+      if (!this.allowRuntimeKeyOverride) {
+        throw new ApiError(400, 'Runtime OpenAI key overrides are disabled.');
+      }
+      const client = this.clientFactory(overrideKey);
+      return this.executeWithClient(handler, client, null);
+    }
+
     const { keyDoc, apiKey } = await this.keyManager.getKeyForUse();
     await this.rateLimiter.consume(keyDoc._id);
 
     const client = this.clientFactory(apiKey);
+    return this.executeWithClient(handler, client, keyDoc);
+  }
+
+  private async executeWithClient<T>(
+    handler: (client: OpenAIClient, context: { keyDoc: OpenAIApiKeyDocument | null }) => Promise<T>,
+    client: OpenAIClient,
+    keyDoc: OpenAIApiKeyDocument | null
+  ): Promise<T> {
     try {
-      const result = await handler(client, keyDoc);
-      return result;
+      return await handler(client, { keyDoc });
     } catch (error) {
-      if (error instanceof ApiError) {
-        throw error;
-      }
-
-      if (error instanceof Error) {
-        if ((error as Error & { name?: string }).name === 'AbortError') {
-          throw new ApiError(499, 'OpenAI streaming request aborted by client.');
-        }
-
-        const status = (error as Error & { status?: number; statusCode?: number }).status
-          ?? (error as Error & { status?: number; statusCode?: number }).statusCode
-          ?? 500;
-        const message = error.message || 'OpenAI request failed';
-
-        if (status === 429) {
-          throw new ApiError(429, 'Upstream OpenAI rate limit reached, please retry later.');
-        }
-
-        throw new ApiError(status, message);
-      }
-
-      throw new ApiError(500, 'Unknown error during OpenAI request');
+      this.handleClientError(error);
     }
   }
 
-  async streamChapter(options: StreamChapterOptions): Promise<StreamChapterResult> {
+  private handleClientError(error: unknown): never {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    if (error instanceof Error) {
+      if ((error as Error & { name?: string }).name === 'AbortError') {
+        throw new ApiError(499, 'OpenAI streaming request aborted by client.');
+      }
+
+      const status = (error as Error & { status?: number; statusCode?: number }).status
+        ?? (error as Error & { status?: number; statusCode?: number }).statusCode
+        ?? 500;
+      const message = error.message || 'OpenAI request failed';
+
+      if (status === 429) {
+        throw new ApiError(429, 'Upstream OpenAI rate limit reached, please retry later.');
+      }
+
+      throw new ApiError(status, message);
+    }
+
+    throw new ApiError(500, 'Unknown error during OpenAI request');
+  }
+
+  async streamChapter(options: StreamChapterOptions, requestOptions: RequestContextOptions = {}): Promise<StreamChapterResult> {
     const prompt = buildChapterPrompt(options);
     const model = prompt.model || this.defaultModel;
 
-    return this.withClient(async (client, keyDoc) => {
+    return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {
         model,
         messages: prompt.messages,
@@ -241,7 +284,7 @@ class OpenAIService {
         }
       }
 
-      if (usage) {
+      if (usage && keyDoc) {
         await Promise.all([
           this.keyManager.markUsage(keyDoc, {
             tokens: usage.totalTokens,
@@ -267,9 +310,9 @@ class OpenAIService {
         usage,
         model,
         requestId,
-        keyDocId: keyDoc._id,
+        keyDocId: keyDoc ? keyDoc._id : undefined,
       };
-    });
+    }, requestOptions);
   }
 
   async completeChat(options: ChatCompletionOptions): Promise<ChatCompletionResultData> {
