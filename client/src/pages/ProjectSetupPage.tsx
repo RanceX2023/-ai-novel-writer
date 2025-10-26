@@ -80,7 +80,12 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
     staleTime: 5 * 60_000,
   });
   const configData = configQuery.data;
-  const availableModels = configData?.models ?? [];
+  const availableModels = useMemo(() => {
+    if (configData?.models?.length) {
+      return Array.from(new Set(configData.models));
+    }
+    return configData?.defaultModel ? [configData.defaultModel] : [];
+  }, [configData]);
   const defaultModel = configData?.defaultModel ?? 'gpt-4o-mini';
 
   const projectsQuery = useQuery({
@@ -256,7 +261,7 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
               models={availableModels}
               defaultModel={defaultModel}
             />
-
+            <button
               type="submit"
               disabled={isSubmitting}
               className="w-full rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-300"
@@ -299,6 +304,11 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
       </header>
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
+        {configQuery.isError ? (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs text-rose-100">
+            模型白名单配置加载失败，已使用默认模型「{defaultModel}」。请检查后端配置或稍后重试。
+          </div>
+        ) : null}
         <section className="grid gap-6 lg:grid-cols-[1.15fr,1fr]">
           <div className="rounded-3xl border border-slate-900/70 bg-slate-950/60 p-6 shadow-xl">
             <div className="flex items-center justify-between">

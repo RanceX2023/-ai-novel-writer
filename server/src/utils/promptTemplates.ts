@@ -1,4 +1,5 @@
 import { ChapterMeta, OutlineMeta, ScenePlanMeta } from '../validators/chapterMeta';
+import { appConfig } from '../config/appConfig';
 
 export interface PromptStyleProfile {
   name?: string;
@@ -621,7 +622,9 @@ export function buildChapterPrompt(options: ChapterPromptOptions): ChatPromptPay
   ].join('\n');
 
   const userMessage = sections.join('\n\n');
-  const resolvedModel = options.model || process.env.OPENAI_CHAPTER_MODEL || process.env.OPENAI_DEFAULT_MODEL;
+  const resolvedModel = options.model?.trim()
+    || process.env.OPENAI_CHAPTER_MODEL?.trim()
+    || appConfig.openai.defaultModel;
 
   return {
     model: resolvedModel,
@@ -746,7 +749,9 @@ export function buildChapterMetaPrompt(options: ChapterMetaPromptOptions): ChatP
   ].join('\n');
 
   const userMessage = buildMetaPromptSections(options);
-  const resolvedModel = options.model || process.env.OPENAI_PLANNING_MODEL || process.env.OPENAI_DEFAULT_MODEL;
+  const resolvedModel = options.model?.trim()
+    || process.env.OPENAI_PLANNING_MODEL?.trim()
+    || appConfig.openai.defaultModel;
 
   return {
     model: resolvedModel,

@@ -302,6 +302,7 @@ const ProjectEditorPage = () => {
   const pendingTokensRef = useRef<string[]>([]);
   const rafRef = useRef<number | null>(null);
   const styleStrengthInitializedRef = useRef(false);
+  const userSelectedModelRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const isManualCancelRef = useRef(false);
@@ -375,29 +376,35 @@ const ProjectEditorPage = () => {
     if (!availableModelOptions.length) {
       return;
     }
-    const stylePreferred = latestStyleProfile?.model?.trim();
+    const stylePreferredRaw = latestStyleProfile?.model?.trim();
+    const stylePreferred = stylePreferredRaw && availableModelOptions.includes(stylePreferredRaw)
+      ? stylePreferredRaw
+      : undefined;
+
     if (!modelInitialisedRef.current) {
-      const initial = stylePreferred && availableModelOptions.includes(stylePreferred)
-        ? stylePreferred
-        : selectedModel && availableModelOptions.includes(selectedModel)
-          ? selectedModel
-          : availableModelOptions[0];
+      const initial = stylePreferred
+        ?? (selectedModel && availableModelOptions.includes(selectedModel) ? selectedModel : undefined)
+        ?? availableModelOptions[0];
       if (initial && initial !== selectedModel) {
+        userSelectedModelRef.current = false;
         setSelectedModel(initial);
       }
-      if (initial) {
-        modelInitialisedRef.current = true;
+      modelInitialisedRef.current = true;
+      return;
+    }
+
+    if (!userSelectedModelRef.current && stylePreferred && stylePreferred !== selectedModel) {
+      userSelectedModelRef.current = false;
+      setSelectedModel(stylePreferred);
+      return;
+    }
+
+    if (!selectedModel || !availableModelOptions.includes(selectedModel)) {
+      const fallback = stylePreferred ?? availableModelOptions[0];
+      if (fallback && fallback !== selectedModel) {
+        userSelectedModelRef.current = false;
+        setSelectedModel(fallback);
       }
-      return;
-    }
-    if (selectedModel && availableModelOptions.includes(selectedModel)) {
-      return;
-    }
-    const fallback = stylePreferred && availableModelOptions.includes(stylePreferred)
-      ? stylePreferred
-      : availableModelOptions[0];
-    if (fallback && fallback !== selectedModel) {
-      setSelectedModel(fallback);
     }
   }, [availableModelOptions, latestStyleProfile?.model, selectedModel]);
 
@@ -1043,10 +1050,13 @@ const ProjectEditorPage = () => {
   const generateMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => {
       const trimmedKey = runtimeApiKey.trim();
+      const headers = allowRuntimeKeyOverride && trimmedKey
+        ? { 'X-OpenAI-Key': trimmedKey }
+        : undefined;
       return fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/generate`, {
         method: 'POST',
         body: JSON.stringify(payload),
-        headers: trimmedKey ? { 'X-OpenAI-Key': trimmedKey } : undefined,
+        headers,
       });
     },
     onMutate: () => {
@@ -1085,10 +1095,13 @@ const ProjectEditorPage = () => {
   const continueMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => {
       const trimmedKey = runtimeApiKey.trim();
+      const headers = allowRuntimeKeyOverride && trimmedKey
+        ? { 'X-OpenAI-Key': trimmedKey }
+        : undefined;
       return fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/${selectedChapterId}/continue`, {
         method: 'POST',
         body: JSON.stringify(payload),
-        headers: trimmedKey ? { 'X-OpenAI-Key': trimmedKey } : undefined,
+        headers,
       });
     },
     onMutate: () => {
@@ -1847,7 +1860,10 @@ const ProjectEditorPage = () => {
   const activeChapter = chaptersQuery.data?.find((chapter) => chapter.id === selectedChapterId) ?? null;
   const styleSummary = buildStyleSummary(latestStyleProfile);
   const styleLanguage = latestStyleProfile?.language?.trim() || defaultStyleFormValues.language;
-  const styleModelLabel = latestStyleProfile?.model?.trim() || (availableModelOptions[0] ?? defaultModel);
+  const stylePreferredModel = latestStyleProfile?.model?.trim();
+  const styleModelLabel = stylePreferredModel && availableModelOptions.includes(stylePreferredModel)
+    ? stylePreferredModel
+    : availableModelOptions[0] ?? defaultModel;
   const currentModelValue = useMemo(() => {
     if (selectedModel && availableModelOptions.includes(selectedModel)) {
       return selectedModel;
@@ -2191,7 +2207,10 @@ const ProjectEditorPage = () => {
                 <div className="mt-2">
                   <select
                     value={currentModelValue}
-                    onChange={(event) => setSelectedModel(event.target.value)}
+                    onChange={(event) => {
+                      userSelectedModelRef.current = true;
+                      setSelectedModel(event.target.value);
+                    }}
                     disabled={!availableModelOptions.length || configQuery.isLoading}
                     className="w-full rounded-xl border border-slate-700/70 bg-slate-950/60 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                   >
@@ -2204,6 +2223,11 @@ const ProjectEditorPage = () => {
                   <p className="mt-2 text-xs text-slate-500">
                     平台默认模型：{defaultModel}；项目默认模型：{styleModelLabel || defaultModel}。
                   </p>
+                  {configQuery.isError ? (
+                    <p className="mt-1 text-xs text-rose-400">
+                      模型配置加载失败，已回退至默认模型。
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -2225,7 +2249,11 @@ const ProjectEditorPage = () => {
                     不会被保存或上传，仅在生成和续写请求中以 X-OpenAI-Key 头发送。
                   </p>
                 </div>
-              ) : null}
+              ) : (
+                <p className="text-xs text-slate-500">
+                  平台未启用临时密钥覆盖。如需更换密钥请联系管理员更新服务端配置或环境变量。
+                </p>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">

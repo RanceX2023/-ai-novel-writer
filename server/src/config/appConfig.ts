@@ -19,6 +19,9 @@ function parseBoolean(value: unknown, field: string): boolean {
   if (value === undefined || value === null || value === '') {
     return false;
   }
+  if (typeof value === 'string' && value.trim() === '') {
+    return false;
+  }
   const normalised = typeof value === 'string' ? value.trim().toLowerCase() : value;
   if (booleanStrings.has(normalised)) {
     return Boolean(booleanStrings.get(normalised));

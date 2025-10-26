@@ -239,7 +239,8 @@ class OpenAIService {
 
   async streamChapter(options: StreamChapterOptions, requestOptions: RequestContextOptions = {}): Promise<StreamChapterResult> {
     const prompt = buildChapterPrompt(options);
-    const model = prompt.model || this.defaultModel;
+    const rawModel = prompt.model ?? this.defaultModel;
+    const model = rawModel.trim();
 
     return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {
@@ -320,7 +321,8 @@ class OpenAIService {
     options: ChatCompletionOptions,
     requestOptions: RequestContextOptions = {}
   ): Promise<ChatCompletionResultData> {
-    const model = options.model || this.defaultModel;
+    const rawModel = options.model ?? this.defaultModel;
+    const model = rawModel.trim();
 
     return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {
@@ -387,7 +389,8 @@ class OpenAIService {
     options: MemoryExtractionOptions,
     requestOptions: RequestContextOptions = {}
   ): Promise<MemoryExtractionResult> {
-    const model = process.env.OPENAI_MEMORY_MODEL || process.env.OPENAI_DEFAULT_MODEL || this.defaultModel;
+    const memoryModel = process.env.OPENAI_MEMORY_MODEL?.trim();
+    const model = memoryModel && memoryModel.length ? memoryModel : this.defaultModel;
     const messages = this.buildMemoryExtractionMessages(options);
 
     return this.withClient(async (client, { keyDoc }) => {
