@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson, HttpError } from '../utils/api';
 import { cancelStreamJob } from '../api/stream';
-import { getProjectStyle, saveProjectStyle } from '../api/projects';
+import { getProjectStyle, saveProjectStyle, exportProject as exportProjectApi } from '../api/projects';
 import { listCharacters, createCharacter, updateCharacter, deleteCharacter } from '../api/characters';
 import OutlinePanel from '../components/outline/OutlinePanel';
 import CharacterPanel from '../components/project/CharacterPanel';
@@ -135,6 +135,11 @@ const modelOptions = [
   { value: 'o4-mini', label: 'OpenAI o4 mini' },
 ];
 
+const exportFormatOptions = [
+  { value: 'md' as const, label: 'Markdown (.zip)', description: '包含 index.md、章节 Markdown 与 meta.json' },
+  { value: 'epub' as const, label: 'EPUB (.epub)', description: '标准电子书格式，兼容常见阅读器' },
+];
+
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) {
     return '—';
@@ -173,6 +178,21 @@ function formatAutoSaveTime(timestamp?: number): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+function formatBytes(bytes?: number | null): string {
+  if (!bytes || Number.isNaN(bytes)) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const display = value >= 10 || unitIndex === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${display} ${units[unitIndex]}`;
 }
 
 function targetLengthPayload(value: number, unit: 'characters' | 'paragraphs') {
@@ -237,6 +257,15 @@ const ProjectEditorPage = () => {
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [isPinnedToBottom, setIsPinnedToBottom] = useState(true);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<'md' | 'epub'>('md');
+  const [exportRange, setExportRange] = useState<'all' | 'selected'>('all');
+  const [exportSelectedIds, setExportSelectedIds] = useState<Set<string>>(new Set());
+  const [exportStatus, setExportStatus] = useState<'idle' | 'downloading' | 'success' | 'error'>('idle');
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportProgress, setExportProgress] = useState<{ loaded: number; total?: number } | null>(null);
+  const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
+  const [exportFileName, setExportFileName] = useState<string | null>(null);
 
   const outputRef = useRef<HTMLDivElement | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -256,6 +285,7 @@ const ProjectEditorPage = () => {
   const localDraftTimerRef = useRef<number | null>(null);
   const restoredDraftKeyRef = useRef<string | null>(null);
   const streamModeRef = useRef<StreamMode | null>(null);
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
 
   const projectQuery = useQuery({
     queryKey: ['project-editor-context', projectId],
@@ -314,6 +344,36 @@ const ProjectEditorPage = () => {
     return styleQuery.data ?? projectQuery.data?.styleProfile ?? null;
   }, [styleQuery.data, projectQuery.data?.styleProfile]);
 
+  const exportableChapters = useMemo(() => {
+    if (!chaptersQuery.data?.length) {
+      return [] as ChapterSummary[];
+    }
+    return [...chaptersQuery.data].sort((a, b) => {
+      const orderA = a.order ?? Number.MAX_SAFE_INTEGER;
+      const orderB = b.order ?? Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      if (a.updatedAt && b.updatedAt) {
+        return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+      }
+      if (a.updatedAt) {
+        return -1;
+      }
+      if (b.updatedAt) {
+        return 1;
+      }
+      return a.title.localeCompare(b.title, 'zh-CN');
+    });
+  }, [chaptersQuery.data]);
+
+  const exportProgressPercent = useMemo(() => {
+    if (!exportProgress || !exportProgress.total || exportProgress.total <= 0) {
+      return null;
+    }
+    return Math.min(100, Math.round((exportProgress.loaded / exportProgress.total) * 100));
+  }, [exportProgress]);
+
   useEffect(() => {
     streamModeRef.current = streamState.mode;
   }, [streamState.mode]);
@@ -330,6 +390,17 @@ const ProjectEditorPage = () => {
       return filtered.length === prev.size ? prev : new Set(filtered);
     });
   }, [memoryQuery.data]);
+
+  useEffect(() => {
+    if (!isExportDialogOpen || exportRange !== 'selected') {
+      return;
+    }
+    const validIds = new Set(exportableChapters.map((chapter) => chapter.id));
+    setExportSelectedIds((prev) => {
+      const filtered = Array.from(prev).filter((id) => validIds.has(id));
+      return filtered.length === prev.size ? prev : new Set(filtered);
+    });
+  }, [exportRange, exportableChapters, isExportDialogOpen]);
 
   useEffect(() => {
     if (!charactersQuery.data) {
@@ -472,6 +543,14 @@ const ProjectEditorPage = () => {
       cleanupStream();
     };
   }, [cleanupStream]);
+
+  useEffect(() => {
+    return () => {
+      if (exportDownloadUrl) {
+        URL.revokeObjectURL(exportDownloadUrl);
+      }
+    };
+  }, [exportDownloadUrl]);
 
   const toggleMemory = useCallback((id: string) => {
     setSelectedMemoryIds((prev) => {
@@ -1417,6 +1496,223 @@ const ProjectEditorPage = () => {
     }
   }, [draftContent, toast]);
 
+  const disposeExportDownload = useCallback(() => {
+    setExportDownloadUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+      return null;
+    });
+    setExportFileName(null);
+  }, []);
+
+  const triggerDownload = useCallback((url: string, fileName: string) => {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, []);
+
+  const handleOpenExportDialog = useCallback(() => {
+    if (!exportableChapters.length) {
+      toast({
+        title: '暂无可导出的章节',
+        description: '请先保存至少一个章节后再试。',
+        variant: 'info',
+      });
+      return;
+    }
+    disposeExportDownload();
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+      exportAbortControllerRef.current = null;
+    }
+    const initialSelection = new Set<string>();
+    if (selectedChapterId && exportableChapters.some((chapter) => chapter.id === selectedChapterId)) {
+      initialSelection.add(selectedChapterId);
+    } else if (exportableChapters[0]) {
+      initialSelection.add(exportableChapters[0].id);
+    }
+    setExportFormat('md');
+    setExportRange('all');
+    setExportSelectedIds(initialSelection);
+    setExportStatus('idle');
+    setExportError(null);
+    setExportProgress(null);
+    setIsExportDialogOpen(true);
+  }, [disposeExportDownload, exportableChapters, selectedChapterId, toast]);
+
+  const handleCloseExportDialog = useCallback(() => {
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+      exportAbortControllerRef.current = null;
+    }
+    disposeExportDownload();
+    setExportStatus('idle');
+    setExportError(null);
+    setExportProgress(null);
+    setIsExportDialogOpen(false);
+  }, [disposeExportDownload]);
+
+  const handleExportRangeChange = useCallback(
+    (range: 'all' | 'selected') => {
+      setExportRange(range);
+      if (range === 'selected') {
+        setExportSelectedIds((prev) => {
+          if (prev.size) {
+            return prev;
+          }
+          const next = new Set<string>();
+          if (selectedChapterId && exportableChapters.some((chapter) => chapter.id === selectedChapterId)) {
+            next.add(selectedChapterId);
+          } else if (exportableChapters[0]) {
+            next.add(exportableChapters[0].id);
+          }
+          return next;
+        });
+      }
+    },
+    [exportableChapters, selectedChapterId]
+  );
+
+  const handleToggleExportChapter = useCallback((chapterId: string) => {
+    setExportSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(chapterId)) {
+        next.delete(chapterId);
+      } else {
+        next.add(chapterId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectAllExportChapters = useCallback(() => {
+    setExportSelectedIds(new Set(exportableChapters.map((chapter) => chapter.id)));
+  }, [exportableChapters]);
+
+  const handleClearExportSelection = useCallback(() => {
+    setExportSelectedIds(new Set());
+  }, []);
+
+  const handleCancelExportDownload = useCallback(() => {
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+      exportAbortControllerRef.current = null;
+    }
+    setExportStatus('idle');
+    setExportProgress(null);
+    setExportError(null);
+  }, []);
+
+  const handleStartExport = useCallback(async () => {
+    if (!projectId) {
+      toast({ title: '导出失败', description: '缺少项目 ID，无法导出。', variant: 'error' });
+      return;
+    }
+    if (!exportableChapters.length) {
+      toast({ title: '暂无可导出的章节', description: '请先保存章节后再试。', variant: 'info' });
+      return;
+    }
+    if (exportRange === 'selected' && exportSelectedIds.size === 0) {
+      setExportError('请选择至少一个章节。');
+      toast({ title: '无法导出', description: '请选择至少一个章节后再试。', variant: 'error' });
+      return;
+    }
+
+    disposeExportDownload();
+
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    exportAbortControllerRef.current = controller;
+
+    setExportStatus('downloading');
+    setExportError(null);
+    setExportProgress({ loaded: 0 });
+
+    try {
+      const chapterIds = exportRange === 'selected' ? Array.from(exportSelectedIds) : undefined;
+      const result = await exportProjectApi(
+        projectId,
+        { format: exportFormat, chapterIds, range: exportRange },
+        {
+          signal: controller.signal,
+          onProgress: (progress) => {
+            setExportProgress({
+              loaded: progress.loaded,
+              total: progress.total,
+            });
+          },
+        }
+      );
+      exportAbortControllerRef.current = null;
+
+      const blob = result.blob;
+      const fileNameFromServer = result.fileName?.trim();
+      const fallbackName = `${projectName || '小说导出'}.${exportFormat === 'md' ? 'zip' : 'epub'}`;
+      const resolvedName = fileNameFromServer && fileNameFromServer.length ? fileNameFromServer : fallbackName;
+
+      setExportFileName(resolvedName);
+      setExportProgress({ loaded: blob.size, total: blob.size });
+      setExportStatus('success');
+
+      const blobUrl = URL.createObjectURL(blob);
+      setExportDownloadUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return blobUrl;
+      });
+
+      triggerDownload(blobUrl, resolvedName);
+      toast({
+        title: '导出成功',
+        description: `已生成 ${exportFormat === 'md' ? 'Markdown 包' : 'EPUB 文件'}，浏览器将自动下载。`,
+        variant: 'success',
+      });
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        setExportStatus('idle');
+        setExportProgress(null);
+        setExportError(null);
+        return;
+      }
+      exportAbortControllerRef.current = null;
+      const message =
+        error instanceof HttpError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : '导出失败，请稍后重试。';
+      setExportError(message);
+      setExportStatus('error');
+      setExportProgress(null);
+      toast({ title: '导出失败', description: message, variant: 'error' });
+    }
+  }, [
+    disposeExportDownload,
+    exportFormat,
+    exportRange,
+    exportSelectedIds,
+    exportableChapters,
+    projectId,
+    projectName,
+    toast,
+    triggerDownload,
+  ]);
+
+  const handleDownloadExportFile = useCallback(() => {
+    if (exportDownloadUrl && exportFileName) {
+      triggerDownload(exportDownloadUrl, exportFileName);
+    }
+  }, [exportDownloadUrl, exportFileName, triggerDownload]);
+
   const handleOpenStyleSheet = () => {
     if (styleSaveMutation.isPending) {
       return;
@@ -1648,6 +1944,14 @@ const ProjectEditorPage = () => {
                 className="inline-flex items-center justify-center rounded-full border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
               >
                 保存
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenExportDialog}
+                disabled={chaptersQuery.isLoading || !exportableChapters.length || exportStatus === 'downloading'}
+                className="inline-flex items-center justify-center rounded-full border border-slate-700/70 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-brand/60 hover:text-brand disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              >
+                导出
               </button>
             </div>
           </div>
@@ -1983,6 +2287,233 @@ const ProjectEditorPage = () => {
         </aside>
         </div>
       </main>
+
+      {isExportDialogOpen ? (
+        <div className="fixed inset-0 z-[1150] flex items-center justify-center bg-slate-950/80 px-4 py-10">
+          <div className="relative w-full max-w-3xl rounded-3xl border border-slate-800/70 bg-slate-950/95 p-6 shadow-2xl">
+            <button
+              type="button"
+              onClick={handleCloseExportDialog}
+              className="absolute right-4 top-4 rounded-full p-1 text-slate-500 transition hover:bg-slate-800/60 hover:text-slate-200"
+              aria-label="关闭导出设置"
+            >
+              ×
+            </button>
+            <h2 className="text-lg font-semibold text-slate-100">导出项目</h2>
+            <p className="mt-1 text-sm text-slate-400">选择导出格式与章节范围，下载 Markdown 包或 EPUB 电子书。</p>
+
+            <div className="mt-6 space-y-5 text-sm text-slate-300">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">导出格式</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  {exportFormatOptions.map((option) => {
+                    const isActive = exportFormat === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setExportFormat(option.value)}
+                        disabled={exportStatus === 'downloading'}
+                        className={clsx(
+                          'w-full rounded-2xl border px-4 py-3 text-left transition',
+                          isActive
+                            ? 'border-brand/60 bg-brand/15 text-brand'
+                            : 'border-slate-800/60 bg-slate-900/70 text-slate-200 hover:border-brand/40 hover:text-brand'
+                        )}
+                      >
+                        <p className="text-sm font-semibold">{option.label}</p>
+                        <p className="mt-1 text-xs text-slate-500">{option.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">导出范围</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExportRangeChange('all')}
+                    className={clsx(
+                      'rounded-full border px-4 py-2 text-xs font-medium transition',
+                      exportRange === 'all'
+                        ? 'border-brand/60 bg-brand/15 text-brand'
+                        : 'border-slate-700/70 bg-slate-900 text-slate-200 hover:border-brand/40 hover:text-brand'
+                    )}
+                    disabled={exportStatus === 'downloading'}
+                  >
+                    全部章节（{exportableChapters.length}）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportRangeChange('selected')}
+                    className={clsx(
+                      'rounded-full border px-4 py-2 text-xs font-medium transition',
+                      exportRange === 'selected'
+                        ? 'border-brand/60 bg-brand/15 text-brand'
+                        : 'border-slate-700/70 bg-slate-900 text-slate-200 hover:border-brand/40 hover:text-brand'
+                    )}
+                    disabled={exportStatus === 'downloading'}
+                  >
+                    指定章节
+                  </button>
+                </div>
+                {exportRange === 'selected' ? (
+                  <div className="mt-3 rounded-2xl border border-slate-800/60 bg-slate-950/50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                      <span>
+                        已选 {exportSelectedIds.size} / {exportableChapters.length} 章节
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSelectAllExportChapters}
+                          className="rounded-full border border-slate-700/70 px-3 py-1 text-[11px] transition hover:border-brand/50 hover:text-brand"
+                          disabled={exportStatus === 'downloading'}
+                        >
+                          全选
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleClearExportSelection}
+                          className="rounded-full border border-slate-700/70 px-3 py-1 text-[11px] transition hover:border-rose-400/60 hover:text-rose-200"
+                          disabled={exportStatus === 'downloading'}
+                        >
+                          清空
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-3 max-h-60 space-y-2 overflow-y-auto pr-1">
+                      {exportableChapters.map((chapter, index) => {
+                        const checked = exportSelectedIds.has(chapter.id);
+                        return (
+                          <label
+                            key={chapter.id}
+                            className={clsx(
+                              'flex cursor-pointer items-start justify-between gap-3 rounded-xl border px-3 py-2 transition',
+                              checked
+                                ? 'border-brand/50 bg-brand/15 text-brand'
+                                : 'border-slate-800/60 bg-slate-900/70 text-slate-200 hover:border-brand/40 hover:text-brand'
+                            )}
+                          >
+                            <div className="flex flex-1 items-center gap-3">
+                              <input
+                                type="checkbox"
+                                className="mt-0.5 h-4 w-4 rounded border-slate-700/70 bg-slate-900 text-brand"
+                                checked={checked}
+                                onChange={() => handleToggleExportChapter(chapter.id)}
+                                disabled={exportStatus === 'downloading'}
+                              />
+                              <div>
+                                <p className="text-sm font-medium text-slate-100">
+                                  第{index + 1}章 · {chapter.title}
+                                </p>
+                                <p className="text-[11px] text-slate-500">
+                                  最近更新：{chapter.updatedAt ? new Date(chapter.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '未记录'}
+                                </p>
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                      {!exportableChapters.length ? (
+                        <p className="text-xs text-slate-500">暂无可导出章节。</p>
+                      ) : null}
+                    </div>
+                    {exportRange === 'selected' && exportSelectedIds.size === 0 ? (
+                      <p className="mt-2 text-xs text-rose-300">请至少选择一个章节。</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-slate-500">将导出全部 {exportableChapters.length} 个章节。</p>
+                )}
+              </div>
+
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">打包进度</p>
+                <div className="mt-3 rounded-2xl border border-slate-800/60 bg-slate-950/50 p-4">
+                  {exportStatus === 'downloading' ? (
+                    <div>
+                      <p className="text-sm text-slate-200">正在打包…</p>
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/40">
+                        <div
+                          className="h-full rounded-full bg-brand transition-[width] duration-200"
+                          style={{ width: `${exportProgressPercent ?? 35}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        已接收 {formatBytes(exportProgress?.loaded)}
+                        {exportProgress?.total ? ` / ${formatBytes(exportProgress.total)}` : ' · 预计大小计算中'}
+                      </p>
+                    </div>
+                  ) : null}
+                  {exportStatus === 'success' ? (
+                    <div>
+                      <p className="text-sm text-emerald-200">打包完成！</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {exportFileName ?? (exportFormat === 'md' ? '导出包.zip' : '导出文件.epub')} · {formatBytes(exportProgress?.loaded)}
+                      </p>
+                    </div>
+                  ) : null}
+                  {exportStatus === 'error' ? (
+                    <p className="text-sm text-rose-300">{exportError ?? '导出失败，请稍后重试。'}</p>
+                  ) : null}
+                  {exportStatus === 'idle' ? (
+                    <p className="text-sm text-slate-400">准备就绪，点击「开始导出」即可生成文件。</p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs text-slate-500">
+                {exportFormat === 'md'
+                  ? '将生成包含 index.md、chapters/*.md 与 meta.json 的压缩包。'
+                  : '将生成含封面、目录与章节内容的 EPUB 电子书。'}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {exportStatus === 'downloading' ? (
+                  <button
+                    type="button"
+                    onClick={handleCancelExportDownload}
+                    className="rounded-full border border-slate-700/70 px-4 py-2 text-xs font-medium text-slate-300 transition hover:border-rose-400/60 hover:text-rose-200"
+                  >
+                    取消打包
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={handleCloseExportDialog}
+                  className="rounded-full border border-slate-700/70 px-4 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:text-slate-100"
+                >
+                  关闭
+                </button>
+                <button
+                  type="button"
+                  onClick={exportStatus === 'success' ? handleDownloadExportFile : handleStartExport}
+                  disabled={
+                    exportStatus === 'downloading'
+                    || (exportStatus !== 'success' && exportRange === 'selected' && exportSelectedIds.size === 0)
+                  }
+                  className={clsx(
+                    'rounded-full px-5 py-2 text-xs font-semibold transition',
+                    exportStatus === 'success'
+                      ? 'bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30'
+                      : 'bg-brand text-brand-foreground shadow-glow hover:bg-brand/90',
+                    exportStatus === 'downloading'
+                    || (exportStatus !== 'success' && exportRange === 'selected' && exportSelectedIds.size === 0)
+                      ? 'cursor-not-allowed opacity-70'
+                      : ''
+                  )}
+                >
+                  {exportStatus === 'success' ? '重新下载' : exportStatus === 'downloading' ? '正在导出…' : '开始导出'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isStyleSheetOpen ? (
         <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-slate-950/80 px-4 py-10">

@@ -22,6 +22,7 @@ import {
   listCharacters,
   updateCharacter,
 } from '../controllers/characterController';
+import { exportProject } from '../controllers/exportController';
 import { getProjectMemory, getProjectMemoryConflicts, syncProjectMemory } from '../controllers/memoryController';
 import { cancelStreamJob, streamJob } from '../controllers/streamController';
 import {
@@ -71,6 +72,7 @@ router.get('/projects', listProjects);
 router.post('/projects', validateBody(projectCreateSchema), createProject);
 router.get('/projects/:projectId/style', getProjectStyle);
 router.post('/projects/:projectId/style', validateBody(projectStyleSchema), saveProjectStyle);
+router.get('/projects/:projectId/export', exportProject);
 
 router.get('/projects/:projectId/characters', listCharacters);
 router.post('/projects/:projectId/characters', validateBody(characterCreateSchema), createCharacter);

@@ -10,6 +10,7 @@ import OpenAIService from './services/openai';
 import MemoryService from './services/memoryService';
 import PlotService from './services/plotService';
 import OutlineService from './services/outlineService';
+import ExportService from './services/exportService';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import baseLogger from './utils/logger';
 import ApiError from './utils/ApiError';
@@ -94,12 +95,14 @@ const generationService = new GenerationService({
 });
 const plotService = new PlotService(openAIService);
 const outlineService = new OutlineService({ openAIService, memoryService });
+const exportService = new ExportService();
 
 app.set('logger', baseLogger);
 app.set('generationService', generationService);
 app.set('memoryService', memoryService);
 app.set('plotService', plotService);
 app.set('outlineService', outlineService);
+app.set('exportService', exportService);
 
 app.get('/health', (_req, res) => {
   const stateMap: Record<number, string> = {
