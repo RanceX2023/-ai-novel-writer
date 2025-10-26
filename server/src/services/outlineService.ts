@@ -1,4 +1,6 @@
 import { Types } from 'mongoose';
+import { ZodError } from 'zod';
+import { jsonrepair } from 'jsonrepair';
 import ApiError from '../utils/ApiError';
 import ProjectModel, { ProjectDocument, StyleProfile as ProjectStyleProfile } from '../models/Project';
 import OutlineNodeModel, { OutlineBeat, OutlineNode } from '../models/OutlineNode';
@@ -314,14 +316,39 @@ class OutlineService {
   }
 
   private parseAiResponse(content: string): OutlineAiResponse {
-    let parsed: unknown;
+    const raw = typeof content === 'string' && content.trim() ? content : '{}';
+
+    const parseAndValidate = (value: string) => {
+      const parsed = JSON.parse(value);
+      return outlineAiResponseSchema.parse(parsed);
+    };
+
     try {
-      parsed = JSON.parse(content || '{}');
+      return parseAndValidate(raw);
     } catch (error) {
-      console.error('[OutlineService] 无法解析 AI 输出：', content);
-      throw new ApiError(502, 'AI 返回内容不是有效的 JSON');
+      if (error instanceof SyntaxError) {
+        try {
+          const repaired = jsonrepair(raw);
+          return parseAndValidate(repaired);
+        } catch (repairError) {
+          if (repairError instanceof ZodError) {
+            console.error('[OutlineService] AI 输出不符合大纲结构规范：', repairError.issues);
+            throw new ApiError(502, 'AI 返回内容结构不符合预期');
+          }
+          console.error('[OutlineService] 无法修复 AI 输出为合法 JSON：', raw);
+          console.error(repairError);
+          throw new ApiError(502, 'AI 返回内容不是有效的 JSON');
+        }
+      }
+
+      if (error instanceof ZodError) {
+        console.error('[OutlineService] AI 输出不符合大纲结构规范：', error.issues);
+        throw new ApiError(502, 'AI 返回内容结构不符合预期');
+      }
+
+      console.error('[OutlineService] 解析 AI 输出时出现未知错误：', error);
+      throw new ApiError(502, 'AI 返回内容解析失败');
     }
-    return outlineAiResponseSchema.parse(parsed);
   }
 
   private flattenOutline(
