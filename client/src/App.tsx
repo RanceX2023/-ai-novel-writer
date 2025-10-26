@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom';
 import ProjectEditorPage from './pages/ProjectEditorPage';
 import ProjectSetupPage from './pages/ProjectSetupPage';
+import SettingsPage from './pages/SettingsPage';
 
 const defaultProjectId = (import.meta.env.VITE_DEFAULT_PROJECT_ID || '').trim();
 
@@ -33,6 +34,7 @@ function App() {
   return (
     <Routes>
       <Route path="/" element={<ProjectSetupPage defaultProjectId={defaultProjectId || undefined} />} />
+      <Route path="/settings" element={<SettingsPage defaultProjectId={defaultProjectId || undefined} />} />
       <Route path="/project/:projectId" element={<ProjectEditorPage />} />
       <Route path="*" element={<NotFound />} />
     </Routes>

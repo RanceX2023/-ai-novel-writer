@@ -67,6 +67,7 @@ interface ChatCompletionResponseChoice {
 
 interface ChatCompletionResponse {
   id?: string;
+  model?: string;
   choices?: ChatCompletionResponseChoice[];
   usage?: {
     prompt_tokens?: number;
@@ -101,6 +102,11 @@ export interface ChatCompletionResultData {
   usage?: UsageRecord;
   model: string;
   keyDocId?: Types.ObjectId;
+  requestId?: string;
+}
+
+export interface ConnectionTestResult {
+  model: string;
   requestId?: string;
 }
 
@@ -383,6 +389,33 @@ class OpenAIService {
         requestId,
       };
     }, requestOptions);
+  }
+
+  async testConnection(
+    options: { runtimeApiKey?: string; model?: string } = {}
+  ): Promise<ConnectionTestResult> {
+    const { runtimeApiKey, model } = options;
+    const trimmedModel = model?.trim() || this.defaultModel;
+
+    return this.withClient(async (client) => {
+      const params: Record<string, unknown> = {
+        model: trimmedModel,
+        messages: [
+          { role: 'system', content: 'You are a concise assistant that confirms API connectivity.' },
+          { role: 'user', content: 'ping' },
+        ],
+        max_tokens: 1,
+        temperature: 0,
+      };
+
+      const response = (await client.chat.completions.create(params)) as ChatCompletionResponse;
+      const usedModel = response.model?.trim() || trimmedModel;
+
+      return {
+        model: usedModel,
+        requestId: response.id,
+      };
+    }, { runtimeApiKey });
   }
 
   async extractMemory(

@@ -9,6 +9,7 @@ import { cancelStreamJob } from '../api/stream';
 import { getProjectStyle, saveProjectStyle, exportProject as exportProjectApi } from '../api/projects';
 import { getAppConfig } from '../api/config';
 import { listCharacters, createCharacter, updateCharacter, deleteCharacter } from '../api/characters';
+import { useRuntimeApiKey } from '../hooks/useRuntimeApiKey';
 import OutlinePanel from '../components/outline/OutlinePanel';
 import CharacterPanel from '../components/project/CharacterPanel';
 import StyleFormFields from '../components/project/StyleFormFields';
@@ -227,7 +228,7 @@ const ProjectEditorPage = () => {
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
   const [selectedOutlineId, setSelectedOutlineId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>('');
-  const [runtimeApiKey, setRuntimeApiKey] = useState<string>('');
+  const { runtimeApiKey, setRuntimeApiKey, clearRuntimeApiKey } = useRuntimeApiKey();
   const [targetLengthUnit, setTargetLengthUnit] = useState<'characters' | 'paragraphs'>('characters');
   const [targetLengthValue, setTargetLengthValue] = useState<number>(1600);
   const [styleStrength, setStyleStrength] = useState<number>(0.65);
@@ -268,9 +269,9 @@ const ProjectEditorPage = () => {
 
   useEffect(() => {
     if (!allowRuntimeKeyOverride && runtimeApiKey) {
-      setRuntimeApiKey('');
+      clearRuntimeApiKey();
     }
-  }, [allowRuntimeKeyOverride, runtimeApiKey]);
+  }, [allowRuntimeKeyOverride, clearRuntimeApiKey, runtimeApiKey]);
 
   const [streamState, setStreamState] = useState<StreamState>({
     mode: null,

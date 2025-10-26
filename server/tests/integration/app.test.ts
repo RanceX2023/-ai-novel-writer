@@ -66,6 +66,7 @@ describe('Application routes', () => {
     const response = await request(app).get('/api/config');
 
     expect(response.status).toBe(200);
+    expect(response.body).toHaveProperty('port');
     expect(response.body).toHaveProperty('models');
     expect(response.body).toHaveProperty('defaultModel');
     expect(response.body).toHaveProperty('allowRuntimeKeyOverride');
@@ -73,5 +74,25 @@ describe('Application routes', () => {
     expect(response.body.models).toContain(response.body.defaultModel);
     expect(typeof response.body.defaultModel).toBe('string');
     expect(typeof response.body.allowRuntimeKeyOverride).toBe('boolean');
+    expect(typeof response.body.port).toBe('number');
+  });
+
+  it('tests OpenAI connectivity via GET /api/config/test-connection', async () => {
+    const originalService = app.get('openAIService');
+    const stubService = {
+      testConnection: jest.fn().mockResolvedValue({ model: 'gpt-stub-test' }),
+    };
+    app.set('openAIService', stubService);
+
+    const response = await request(app).get('/api/config/test-connection');
+
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+    expect(response.body.modelUsed).toBe('gpt-stub-test');
+    expect(typeof response.body.latencyMs).toBe('number');
+    expect(response.body.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(stubService.testConnection).toHaveBeenCalledWith({ runtimeApiKey: undefined });
+
+    app.set('openAIService', originalService);
   });
 });

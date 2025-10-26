@@ -42,7 +42,7 @@ import {
   reorderOutlineNodes,
   upsertOutlineNode,
 } from '../controllers/outlineController';
-import { getPublicConfig } from '../controllers/configController';
+import { getPublicConfig, testConnection } from '../controllers/configController';
 import { validateBody } from '../middleware/validate';
 import { chapterContinuationLimiter, chapterGenerationLimiter } from '../middleware/rateLimiters';
 import {
@@ -70,6 +70,7 @@ import {
 const router = Router();
 
 router.get('/config', getPublicConfig);
+router.get('/config/test-connection', testConnection);
 router.get('/projects', listProjects);
 router.post('/projects', validateBody(projectCreateSchema), createProject);
 router.get('/projects/:projectId/style', getProjectStyle);

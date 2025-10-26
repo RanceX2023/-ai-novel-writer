@@ -103,6 +103,7 @@ const outlineService = new OutlineService({ openAIService, memoryService });
 const exportService = new ExportService();
 
 app.set('logger', baseLogger);
+app.set('openAIService', openAIService);
 app.set('generationService', generationService);
 app.set('memoryService', memoryService);
 app.set('plotService', plotService);
