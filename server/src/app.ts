@@ -8,6 +8,7 @@ import routes from './routes';
 import GenerationService from './services/generationService';
 import OpenAIService from './services/openai';
 import { appConfig } from './config/appConfig';
+import runtimeConfig from './config/runtimeConfig';
 import MemoryService from './services/memoryService';
 import PlotService from './services/plotService';
 import OutlineService from './services/outlineService';
@@ -91,11 +92,12 @@ app.use(
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
-const openAIService = new OpenAIService();
+const openAIService = new OpenAIService({ runtimeConfig });
 const memoryService = new MemoryService({ openAIService });
 const generationService = new GenerationService({
   openAIService,
   memoryService,
+  runtimeConfig,
   logger: baseLogger.child({ module: 'generation-service' }),
 });
 const plotService = new PlotService(openAIService);
@@ -103,6 +105,7 @@ const outlineService = new OutlineService({ openAIService, memoryService });
 const exportService = new ExportService();
 
 app.set('logger', baseLogger);
+app.set('runtimeConfig', runtimeConfig);
 app.set('openAIService', openAIService);
 app.set('generationService', generationService);
 app.set('memoryService', memoryService);
@@ -127,7 +130,7 @@ app.get('/health', (_req, res) => {
     code: healthy ? 'SERVICE_HEALTHY' : 'SERVICE_UNHEALTHY',
     status: healthy ? 'ok' : 'unhealthy',
     mongo,
-    model: appConfig.openai.defaultModel,
+    model: runtimeConfig.getDefaultModel(),
   });
 });
 

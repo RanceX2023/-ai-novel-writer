@@ -20,12 +20,21 @@ class OpenAIRateLimiter {
 
   constructor({ model = OpenAIRateLimitModel, limitPerWindow, windowMs }: RateLimiterOptions = {}) {
     this.model = model;
-    this.limit = Number.isInteger(limitPerWindow)
-      ? Number(limitPerWindow)
+    this.limit = Number.isFinite(limitPerWindow) && Number(limitPerWindow) > 0
+      ? Math.floor(Number(limitPerWindow))
       : parseInt(process.env.OPENAI_RATE_LIMIT_PER_MINUTE ?? '', 10) || 60;
-    this.windowMs = Number.isInteger(windowMs)
-      ? Number(windowMs)
+    this.windowMs = Number.isFinite(windowMs) && Number(windowMs) > 0
+      ? Math.floor(Number(windowMs))
       : parseInt(process.env.OPENAI_RATE_LIMIT_WINDOW_MS ?? '', 10) || 60_000;
+  }
+
+  updateLimits({ limitPerWindow, windowMs }: { limitPerWindow?: number; windowMs?: number }): void {
+    if (Number.isFinite(limitPerWindow) && Number(limitPerWindow) > 0) {
+      this.limit = Math.floor(Number(limitPerWindow));
+    }
+    if (Number.isFinite(windowMs) && Number(windowMs) > 0) {
+      this.windowMs = Math.floor(Number(windowMs));
+    }
   }
 
   private currentWindowStart(now: number = Date.now()): Date {
