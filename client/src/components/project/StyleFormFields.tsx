@@ -40,7 +40,10 @@ const StyleFormFields = <TFormValues extends StyleFormValues = StyleFormValues>(
   const watchedStrength = watch('styleStrength');
   const styleStrength = Number.isFinite(watchedStrength) ? Number(watchedStrength) : 0;
   const language = watch('language') ?? '';
+  const modelValue = watch('model') ?? '';
   const styleStrengthField = register('styleStrength', { valueAsNumber: true });
+  const modelField = register('model');
+  const hasModelOptions = Array.isArray(models) && models.length > 0;
 
   return (
     <div className="space-y-4">
@@ -121,6 +124,39 @@ const StyleFormFields = <TFormValues extends StyleFormValues = StyleFormValues>(
         />
         {errors.language?.message ? <p className={errorTextClass}>{errors.language.message}</p> : null}
       </div>
+
+      {hasModelOptions ? (
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+            默认模型
+          </label>
+          <select
+            className={`${inputBaseClass} appearance-none`}
+            disabled={disabled}
+            value={modelValue}
+            onChange={(event) => {
+              modelField.onChange(event);
+            }}
+            onBlur={modelField.onBlur}
+            name={modelField.name}
+            ref={modelField.ref}
+          >
+            <option value="">使用平台默认（{defaultModel ?? '未配置'}）</option>
+            {models?.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
+          {errors.model?.message ? (
+            <p className={errorTextClass}>{errors.model.message as string}</p>
+          ) : (
+            <p className={helperTextClass}>
+              平台默认模型：{defaultModel ?? '未配置'}；仅在需要时覆盖。
+            </p>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 };

@@ -91,4 +91,54 @@ describe('OpenAIService', () => {
     expect(updatedKey.usageCount).toBe(1);
     expect(updatedKey.totalTokens).toBe(288);
   });
+
+  test('uses runtime API key override when enabled', async () => {
+    const manager = {
+      getKeyForUse: jest.fn(),
+      markUsage: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const createMock = jest.fn().mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: 'runtime override response',
+          },
+        },
+      ],
+    });
+
+    const clientFactory = jest.fn((apiKey) => {
+      expect(apiKey).toBe('sk-runtime-override');
+      return {
+        chat: {
+          completions: {
+            create: createMock,
+          },
+        },
+      };
+    });
+
+    const service = new OpenAIService({
+      keyManager: manager,
+      usageModel: { create: jest.fn() },
+      clientFactory,
+      allowRuntimeKeyOverride: true,
+      defaultModel: 'gpt-test-model',
+    });
+
+    const result = await service.completeChat(
+      {
+        messages: [
+          { role: 'user', content: 'hello?' },
+        ],
+      },
+      { runtimeApiKey: 'sk-runtime-override' }
+    );
+
+    expect(clientFactory).toHaveBeenCalledTimes(1);
+    expect(manager.getKeyForUse).not.toHaveBeenCalled();
+    expect(result.content).toBe('runtime override response');
+    expect(result.keyDocId).toBeUndefined();
+  });
 });

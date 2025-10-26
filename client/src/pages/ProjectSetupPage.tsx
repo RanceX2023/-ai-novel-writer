@@ -6,6 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { createProject, getProjectStyle, listProjects, saveProjectStyle } from '../api/projects';
+import { getAppConfig } from '../api/config';
 import StyleFormFields from '../components/project/StyleFormFields';
 import { useToast } from '../components/ui/ToastProvider';
 import { HttpError } from '../utils/api';
@@ -48,16 +49,20 @@ function formatTimestamp(value?: string | null): string {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
-function buildStyleSummary(style?: StyleProfile | null): string {
-  if (!style) {
-    return '尚未设置风格参数';
-  }
-  const parts = [style.diction, style.tone, style.pacing, style.pov]
+function buildStyleSummary(style?: StyleProfile | null, fallbackModel?: string): string {
+  const parts = [style?.diction, style?.tone, style?.pacing, style?.pov]
     .map((item) => (item ? item.trim() : ''))
     .filter(Boolean);
+
   if (!parts.length) {
-    return '尚未设置风格参数';
+    parts.push('尚未设置风格参数');
   }
+
+  const modelLabel = style?.model?.trim() || fallbackModel?.trim();
+  if (modelLabel) {
+    parts.push(`模型：${modelLabel}`);
+  }
+
   return parts.join(' · ');
 }
 
@@ -68,6 +73,15 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+
+  const configQuery = useQuery({
+    queryKey: ['app-config'],
+    queryFn: getAppConfig,
+    staleTime: 5 * 60_000,
+  });
+  const configData = configQuery.data;
+  const availableModels = configData?.models ?? [];
+  const defaultModel = configData?.defaultModel ?? 'gpt-4o-mini';
 
   const projectsQuery = useQuery({
     queryKey: ['project-list'],
@@ -237,8 +251,12 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                 <p className="mt-2 text-xs text-rose-400">{createForm.formState.errors.name.message}</p>
               ) : null}
             </div>
-            <StyleFormFields form={createForm} />
-            <button
+            <StyleFormFields
+              form={createForm}
+              models={availableModels}
+              defaultModel={defaultModel}
+            />
+
               type="submit"
               disabled={isSubmitting}
               className="w-full rounded-full bg-brand px-5 py-2 text-sm font-semibold text-brand-foreground shadow-glow transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-300"
@@ -325,8 +343,8 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div className="min-w-0">
                               <p className="truncate text-base font-semibold text-slate-100">{project.name}</p>
-                              <p className="mt-1 text-xs text-slate-400">{buildStyleSummary(project.styleProfile)}</p>
-                            </div>
+                              <p className="mt-1 text-xs text-slate-400">{buildStyleSummary(project.styleProfile, defaultModel)}</p>
+
                             <div className="flex flex-col items-end gap-2 text-xs text-slate-500">
                               <span>创建于：{formatTimestamp(project.createdAt)}</span>
                               {defaultProjectId === project.id ? (
@@ -379,6 +397,8 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                   <StyleFormFields
                     form={styleForm}
                     disabled={!selectedProjectId || styleQuery.isFetching || updateStyleMutation.isPending}
+                    models={availableModels}
+                    defaultModel={defaultModel}
                   />
                 </div>
               ) : (

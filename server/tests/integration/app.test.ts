@@ -8,6 +8,7 @@ describe('Application routes', () => {
     expect([200, 503]).toContain(response.status);
     expect(response.body).toHaveProperty('status');
     expect(response.body).toHaveProperty('mongo');
+    expect(response.body).toHaveProperty('model');
   });
 
   it('rejects invalid chapter generation payloads', async () => {
@@ -22,6 +23,24 @@ describe('Application routes', () => {
     expect(response.body.details.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ path: 'outlineNodeId' }),
+      ])
+    );
+  });
+
+  it('rejects chapter generation when model is not allowed', async () => {
+    const response = await request(app)
+      .post('/api/projects/507f1f77bcf86cd799439099/chapters/generate')
+      .send({
+        outlineNodeId: 'outline-1',
+        model: 'gpt-nonexistent',
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('VALIDATION_FAILED');
+    expect(response.body.details).toBeDefined();
+    expect(response.body.details.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'model' }),
       ])
     );
   });
@@ -41,5 +60,18 @@ describe('Application routes', () => {
     expect(second.body.details).toBeDefined();
     expect(second.body.details.retryAfter).toBeGreaterThan(0);
     expect(second.headers['retry-after']).toBeDefined();
+  });
+
+  it('returns public configuration from GET /api/config', async () => {
+    const response = await request(app).get('/api/config');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveProperty('models');
+    expect(response.body).toHaveProperty('defaultModel');
+    expect(response.body).toHaveProperty('allowRuntimeKeyOverride');
+    expect(Array.isArray(response.body.models)).toBe(true);
+    expect(response.body.models).toContain(response.body.defaultModel);
+    expect(typeof response.body.defaultModel).toBe('string');
+    expect(typeof response.body.allowRuntimeKeyOverride).toBe('boolean');
   });
 });

@@ -30,9 +30,18 @@ const envSchema = z.object({
   NODE_ENV: z.string().optional(),
   PORT: z.union([z.string(), z.number()]).optional(),
   OPENAI_API_KEY: z.string().trim().min(1, 'OPENAI_API_KEY is required'),
-  OPENAI_MODEL: z.string().trim().min(1).default('gpt-4o-mini'),
+  OPENAI_MODEL: z.string().trim().min(1).optional(),
+  OPENAI_DEFAULT_MODEL: z.string().trim().min(1).optional(),
   OPENAI_ALLOWED_MODELS: z.string().optional(),
-  OPENAI_BASE_URL: z.string().trim().url('OPENAI_BASE_URL must be a valid URL').optional(),
+  OPENAI_BASE_URL: z
+    .preprocess((value) => {
+      if (typeof value !== 'string') {
+        return value;
+      }
+      const trimmed = value.trim();
+      return trimmed.length ? trimmed : undefined;
+    }, z.string().url('OPENAI_BASE_URL must be a valid URL'))
+    .optional(),
   ALLOW_RUNTIME_KEY_OVERRIDE: z.union([z.string(), z.boolean(), z.number()]).optional(),
 });
 
@@ -75,7 +84,11 @@ const env = parsed.data;
 
 const port = parsePort(env.PORT);
 const allowRuntimeKeyOverride = parseBoolean(env.ALLOW_RUNTIME_KEY_OVERRIDE, 'ALLOW_RUNTIME_KEY_OVERRIDE');
-const defaultModel = env.OPENAI_MODEL;
+const defaultModelSource = env.OPENAI_MODEL ?? env.OPENAI_DEFAULT_MODEL ?? 'gpt-4o-mini';
+const defaultModel = defaultModelSource.trim();
+if (!defaultModel) {
+  throw new Error('Default OpenAI model must not be empty');
+}
 const allowedModels = parseAllowedModels(env.OPENAI_ALLOWED_MODELS, defaultModel);
 
 export const appConfig = {

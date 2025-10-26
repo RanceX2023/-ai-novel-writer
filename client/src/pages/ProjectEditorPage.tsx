@@ -7,6 +7,7 @@ import { useParams } from 'react-router-dom';
 import { API_BASE, fetchJson, HttpError } from '../utils/api';
 import { cancelStreamJob } from '../api/stream';
 import { getProjectStyle, saveProjectStyle, exportProject as exportProjectApi } from '../api/projects';
+import { getAppConfig } from '../api/config';
 import { listCharacters, createCharacter, updateCharacter, deleteCharacter } from '../api/characters';
 import OutlinePanel from '../components/outline/OutlinePanel';
 import CharacterPanel from '../components/project/CharacterPanel';
@@ -129,12 +130,6 @@ type AutoSaveState = {
   message?: string;
 };
 
-const modelOptions = [
-  { value: 'gpt-4o-mini', label: 'GPT-4o mini' },
-  { value: 'gpt-4o', label: 'GPT-4o' },
-  { value: 'o4-mini', label: 'OpenAI o4 mini' },
-];
-
 const exportFormatOptions = [
   { value: 'md' as const, label: 'Markdown (.zip)', description: '包含 index.md、章节 Markdown 与 meta.json' },
   { value: 'epub' as const, label: 'EPUB (.epub)', description: '标准电子书格式，兼容常见阅读器' },
@@ -231,7 +226,8 @@ const ProjectEditorPage = () => {
 
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
   const [selectedOutlineId, setSelectedOutlineId] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState<string>(modelOptions[0]?.value ?? 'gpt-4o-mini');
+  const [selectedModel, setSelectedModel] = useState<string>('');
+  const [runtimeApiKey, setRuntimeApiKey] = useState<string>('');
   const [targetLengthUnit, setTargetLengthUnit] = useState<'characters' | 'paragraphs'>('characters');
   const [targetLengthValue, setTargetLengthValue] = useState<number>(1600);
   const [styleStrength, setStyleStrength] = useState<number>(0.65);
@@ -245,6 +241,36 @@ const ProjectEditorPage = () => {
   const [selectedCharacterIds, setSelectedCharacterIds] = useState<Set<string>>(new Set());
   const [pendingCharacterDeleteId, setPendingCharacterDeleteId] = useState<string | null>(null);
   const [pendingChapterSelect, setPendingChapterSelect] = useState<'new' | null>(null);
+
+  const configQuery = useQuery({
+    queryKey: ['app-config'],
+    queryFn: getAppConfig,
+    staleTime: 5 * 60_000,
+  });
+
+  const configData = configQuery.data;
+  const availableModels = useMemo(() => {
+    if (configData?.models?.length) {
+      return Array.from(new Set(configData.models));
+    }
+    return configData?.defaultModel ? [configData.defaultModel] : [];
+  }, [configData]);
+  const defaultModel = configData?.defaultModel ?? 'gpt-4o-mini';
+  const availableModelOptions = useMemo(() => {
+    if (!availableModels.length) {
+      return defaultModel ? [defaultModel] : [];
+    }
+    return availableModels.includes(defaultModel)
+      ? availableModels
+      : [defaultModel, ...availableModels];
+  }, [availableModels, defaultModel]);
+  const allowRuntimeKeyOverride = configData?.allowRuntimeKeyOverride ?? false;
+
+  useEffect(() => {
+    if (!allowRuntimeKeyOverride && runtimeApiKey) {
+      setRuntimeApiKey('');
+    }
+  }, [allowRuntimeKeyOverride, runtimeApiKey]);
 
   const [streamState, setStreamState] = useState<StreamState>({
     mode: null,
@@ -286,6 +312,7 @@ const ProjectEditorPage = () => {
   const restoredDraftKeyRef = useRef<string | null>(null);
   const streamModeRef = useRef<StreamMode | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
+  const modelInitialisedRef = useRef(false);
 
   const projectQuery = useQuery({
     queryKey: ['project-editor-context', projectId],
@@ -343,6 +370,36 @@ const ProjectEditorPage = () => {
   const latestStyleProfile = useMemo<StyleProfile | null>(() => {
     return styleQuery.data ?? projectQuery.data?.styleProfile ?? null;
   }, [styleQuery.data, projectQuery.data?.styleProfile]);
+
+  useEffect(() => {
+    if (!availableModelOptions.length) {
+      return;
+    }
+    const stylePreferred = latestStyleProfile?.model?.trim();
+    if (!modelInitialisedRef.current) {
+      const initial = stylePreferred && availableModelOptions.includes(stylePreferred)
+        ? stylePreferred
+        : selectedModel && availableModelOptions.includes(selectedModel)
+          ? selectedModel
+          : availableModelOptions[0];
+      if (initial && initial !== selectedModel) {
+        setSelectedModel(initial);
+      }
+      if (initial) {
+        modelInitialisedRef.current = true;
+      }
+      return;
+    }
+    if (selectedModel && availableModelOptions.includes(selectedModel)) {
+      return;
+    }
+    const fallback = stylePreferred && availableModelOptions.includes(stylePreferred)
+      ? stylePreferred
+      : availableModelOptions[0];
+    if (fallback && fallback !== selectedModel) {
+      setSelectedModel(fallback);
+    }
+  }, [availableModelOptions, latestStyleProfile?.model, selectedModel]);
 
   const exportableChapters = useMemo(() => {
     if (!chaptersQuery.data?.length) {
@@ -960,22 +1017,38 @@ const ProjectEditorPage = () => {
       ? Math.max(0, Math.min(styleStrength, 1))
       : null;
     const styleOverride = intensity !== null ? { styleStrength: intensity, strength: intensity } : undefined;
+    const allowedModels = availableModelOptions;
+    const modelForRequest = selectedModel && allowedModels.includes(selectedModel)
+      ? selectedModel
+      : allowedModels[0] ?? defaultModel;
 
     return {
       memoryIds: memoryIds.length ? memoryIds : undefined,
       characterIds: characterIds.length ? characterIds : undefined,
       targetLength,
       styleOverride,
-      model: selectedModel,
+      model: modelForRequest ?? undefined,
     };
-  }, [selectedMemoryIds, selectedCharacterIds, targetLengthValue, targetLengthUnit, styleStrength, selectedModel]);
+  }, [
+    selectedMemoryIds,
+    selectedCharacterIds,
+    targetLengthValue,
+    targetLengthUnit,
+    styleStrength,
+    selectedModel,
+    availableModelOptions,
+    defaultModel,
+  ]);
 
   const generateMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
-      fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/generate`, {
+    mutationFn: (payload: Record<string, unknown>) => {
+      const trimmedKey = runtimeApiKey.trim();
+      return fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/generate`, {
         method: 'POST',
         body: JSON.stringify(payload),
-      }),
+        headers: trimmedKey ? { 'X-OpenAI-Key': trimmedKey } : undefined,
+      });
+    },
     onMutate: () => {
       clearReconnectTimer();
       resetStreamBuffers();
@@ -1010,11 +1083,14 @@ const ProjectEditorPage = () => {
   });
 
   const continueMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
-      fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/${selectedChapterId}/continue`, {
+    mutationFn: (payload: Record<string, unknown>) => {
+      const trimmedKey = runtimeApiKey.trim();
+      return fetchJson<GenerationJobResponse>(`/api/projects/${projectId}/chapters/${selectedChapterId}/continue`, {
         method: 'POST',
         body: JSON.stringify(payload),
-      }),
+        headers: trimmedKey ? { 'X-OpenAI-Key': trimmedKey } : undefined,
+      });
+    },
     onMutate: () => {
       clearReconnectTimer();
       resetStreamBuffers();
@@ -1771,6 +1847,13 @@ const ProjectEditorPage = () => {
   const activeChapter = chaptersQuery.data?.find((chapter) => chapter.id === selectedChapterId) ?? null;
   const styleSummary = buildStyleSummary(latestStyleProfile);
   const styleLanguage = latestStyleProfile?.language?.trim() || defaultStyleFormValues.language;
+  const styleModelLabel = latestStyleProfile?.model?.trim() || (availableModelOptions[0] ?? defaultModel);
+  const currentModelValue = useMemo(() => {
+    if (selectedModel && availableModelOptions.includes(selectedModel)) {
+      return selectedModel;
+    }
+    return availableModelOptions[0] ?? defaultModel ?? '';
+  }, [selectedModel, availableModelOptions, defaultModel]);
 
   const statusLabel = (() => {
     if (isCancelling) {
@@ -2107,18 +2190,42 @@ const ProjectEditorPage = () => {
                 </label>
                 <div className="mt-2">
                   <select
-                    value={selectedModel}
+                    value={currentModelValue}
                     onChange={(event) => setSelectedModel(event.target.value)}
-                    className="w-full rounded-xl border border-slate-700/70 bg-slate-950/60 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
+                    disabled={!availableModelOptions.length || configQuery.isLoading}
+                    className="w-full rounded-xl border border-slate-700/70 bg-slate-950/60 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                   >
-                    {modelOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
+                    {availableModelOptions.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
                       </option>
                     ))}
                   </select>
+                  <p className="mt-2 text-xs text-slate-500">
+                    平台默认模型：{defaultModel}；项目默认模型：{styleModelLabel || defaultModel}。
+                  </p>
                 </div>
               </div>
+
+              {allowRuntimeKeyOverride ? (
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+                    临时密钥
+                  </label>
+                  <input
+                    type="password"
+                    value={runtimeApiKey}
+                    onChange={(event) => setRuntimeApiKey(event.target.value)}
+                    placeholder="仅当前请求使用"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="mt-2 w-full rounded-xl border border-slate-700/70 bg-slate-950/60 px-4 py-2 text-sm text-slate-100 focus:border-brand focus:outline-none"
+                  />
+                  <p className="mt-2 text-xs text-slate-500">
+                    不会被保存或上传，仅在生成和续写请求中以 X-OpenAI-Key 头发送。
+                  </p>
+                </div>
+              ) : null}
 
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
@@ -2167,6 +2274,7 @@ const ProjectEditorPage = () => {
                       <p className="text-xs text-slate-500">作家模仿：未设置</p>
                     )}
                     <p className="text-xs text-slate-500">目标语言：{styleLanguage}</p>
+                    <p className="text-xs text-slate-500">默认模型：{styleModelLabel ?? defaultModel}</p>
                     {styleQuery.isFetching ? (
                       <p className="text-[11px] text-slate-500">同步中…</p>
                     ) : null}
@@ -2530,7 +2638,12 @@ const ProjectEditorPage = () => {
             <h2 className="text-lg font-semibold text-slate-100">项目风格设定</h2>
             <p className="mt-1 text-sm text-slate-400">更新默认风格参数，保存后章节生成将自动引用。</p>
             <form className="mt-6 space-y-5" onSubmit={handleStyleSubmit}>
-              <StyleFormFields form={styleForm} disabled={styleSaveMutation.isPending} />
+              <StyleFormFields
+                form={styleForm}
+                disabled={styleSaveMutation.isPending}
+                models={availableModelOptions}
+                defaultModel={defaultModel}
+              />
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-slate-500">
                   建议结合章节内容随时调节，风格强度可在生成面板中快速微调。
