@@ -445,7 +445,7 @@ const ProjectEditorPage = () => {
 
 
   useEffect(() => {
-
+    if (!chaptersQuery.data?.length) {
       setSelectedChapterId(null);
       return;
     }
