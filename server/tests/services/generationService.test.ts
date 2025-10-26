@@ -148,6 +148,7 @@ describe('GenerationService streaming lifecycle', () => {
     const failedJob = await waitForJobStatus(job.id, 'failed');
 
     expect(failedJob.error?.message).toBe('Client disconnected from stream');
+    expect(failedJob.retryCount).toBe(0);
     expect(failedJob.completedAt).toBeDefined();
     expect(mockResponse.writableEnded).toBe(true);
   });
@@ -186,6 +187,7 @@ describe('GenerationService streaming lifecycle', () => {
     expect(completedJob.tokensGenerated).toBe(usage.completionTokens);
     expect(completedJob.cost).toBeCloseTo(0.0068, 5);
     expect(completedJob.model).toBe('gpt-4o-mini');
+    expect(completedJob.retryCount).toBe(0);
     expect(completedJob.error).toBeNull();
   });
 });

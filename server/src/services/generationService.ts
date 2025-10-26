@@ -97,7 +97,7 @@ class GenerationService {
     this.jobControllers = new Map();
     this.cancelledJobReasons = new Map();
     this.disconnectTimers = new Map();
-    this.disconnectGraceMs = Math.max(0, Number(process.env.GENERATION_STREAM_DISCONNECT_GRACE_MS ?? 10_000));
+    this.disconnectGraceMs = Math.max(0, Number(process.env.GENERATION_STREAM_DISCONNECT_GRACE_MS ?? 0));
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
     this.logger = logger ?? baseLogger.child({ module: 'generation-service' });
   }
@@ -123,6 +123,8 @@ class GenerationService {
       const currentSubscribers = this.streamSubscriptions.get(jobId);
       currentSubscribers?.delete(subscription);
 
+      this.logger.debug({ jobId, subscribers: currentSubscribers?.size ?? 0 }, 'sse subscriber disconnected');
+
       if (!currentSubscribers || currentSubscribers.size === 0) {
         this.scheduleDisconnect(jobId);
       }
@@ -145,8 +147,11 @@ class GenerationService {
       }
 
       if (this.jobControllers.has(jobId)) {
-        this.logger.warn({ jobId }, 'no active SSE subscribers; cancelling job after grace period');
-        this.cancelJob(jobId, 'SSE连接已断开且在宽限期内未恢复');
+        const graceMs = this.disconnectGraceMs;
+        this.logger.warn({ jobId, graceMs }, graceMs > 0
+          ? 'no active SSE subscribers; cancelling job after grace period'
+          : 'no active SSE subscribers; cancelling job');
+        this.cancelJob(jobId, 'Client disconnected from stream');
         return;
       }
 
@@ -301,12 +306,19 @@ class GenerationService {
 
       job.metaValidationFailures = planning.failures;
       job.metaRetryDurationMs = planning.retryDurationMs;
+      job.retryCount = planning.failures;
 
-      this.emit(job._id.toString(), 'meta', {
+      const metaPayload: Record<string, unknown> = {
         meta: planning.meta,
         targetLength: effectiveTargetLength,
         fallback: planning.usedFallback,
-      });
+        retryCount: planning.failures,
+      };
+      const metaRequestId = this.getJobRequestId(job.metadata);
+      if (metaRequestId) {
+        metaPayload.requestId = metaRequestId;
+      }
+      this.emit(job._id.toString(), 'meta', metaPayload);
 
       const promptOptions: StreamChapterOptions = {
         projectTitle: project.name,
@@ -456,12 +468,19 @@ class GenerationService {
 
       job.metaValidationFailures = planning.failures;
       job.metaRetryDurationMs = planning.retryDurationMs;
+      job.retryCount = planning.failures;
 
-      this.emit(job._id.toString(), 'meta', {
+      const metaPayload: Record<string, unknown> = {
         meta: planning.meta,
         targetLength: effectiveTargetLength,
         fallback: planning.usedFallback,
-      });
+        retryCount: planning.failures,
+      };
+      const metaRequestId = this.getJobRequestId(job.metadata);
+      if (metaRequestId) {
+        metaPayload.requestId = metaRequestId;
+      }
+      this.emit(job._id.toString(), 'meta', metaPayload);
 
       const promptOptions: StreamChapterOptions = {
         projectTitle: project.name,
@@ -548,6 +567,7 @@ class GenerationService {
         projectId: job.project?.toString(),
         chapterId: job.chapter?.toString(),
         type: job.type,
+        requestId: this.getJobRequestId(job.metadata),
       }, 'generation job started');
 
       try {
@@ -570,6 +590,8 @@ class GenerationService {
           completionTokens: job.completionTokens ?? 0,
           promptTokens: job.promptTokens ?? 0,
           cost: job.cost ?? 0,
+          retryCount: job.retryCount ?? 0,
+          requestId: this.getJobRequestId(job.metadata),
         }, 'generation job completed');
 
         const requestId = this.getJobRequestId(job.metadata);
@@ -577,6 +599,7 @@ class GenerationService {
           jobId,
           status: 'completed',
           durationMs,
+          retryCount: job.retryCount ?? 0,
         };
         if (requestId) {
           donePayload.requestId = requestId;
@@ -967,8 +990,10 @@ class GenerationService {
       completionTokens: job.completionTokens ?? 0,
       promptTokens: job.promptTokens ?? 0,
       cost: job.cost ?? 0,
+      retryCount: job.retryCount ?? 0,
       error: serialisedError.message,
       code,
+      requestId: this.getJobRequestId(job.metadata),
     }, 'generation job failed');
 
     const errorPayload: Record<string, unknown> = { message: serialisedError.message };
@@ -981,7 +1006,7 @@ class GenerationService {
     }
     this.emit(job.id, 'error', errorPayload);
 
-    const donePayload: Record<string, unknown> = { jobId: job.id, status: 'failed' };
+    const donePayload: Record<string, unknown> = { jobId: job.id, status: 'failed', retryCount: job.retryCount ?? 0 };
     if (code) {
       donePayload.code = code;
     }
@@ -1123,6 +1148,7 @@ class GenerationService {
               jobId: job.id,
               progress,
               tokensGenerated,
+              retryCount: job.retryCount ?? 0,
             };
             const effectiveRequestId = getEffectiveRequestId();
             if (effectiveRequestId) {
@@ -1130,7 +1156,10 @@ class GenerationService {
             }
             this.emit(job.id, 'progress', progressPayload);
           }
-          const deltaPayload: Record<string, unknown> = { text: delta };
+          const deltaPayload: Record<string, unknown> = {
+            text: delta,
+            retryCount: job.retryCount ?? 0,
+          };
           const effectiveRequestId = getEffectiveRequestId();
           if (effectiveRequestId) {
             deltaPayload.requestId = effectiveRequestId;

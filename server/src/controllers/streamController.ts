@@ -47,21 +47,37 @@ export const streamJob = async (req: Request, res: Response, next: NextFunction)
       type: job.type,
       progress: job.progress,
       tokensGenerated: job.tokensGenerated,
+      retryCount: job.retryCount ?? 0,
       requestId,
     };
 
     res.write(`event: start\ndata: ${JSON.stringify(initialPayload)}\n\n`);
 
-    logger.info({ jobId, status: job.status, type: job.type }, 'generation stream opened');
+    logger.info({
+      jobId,
+      status: job.status,
+      type: job.type,
+      retryCount: job.retryCount ?? 0,
+      ...(requestId ? { requestId } : {}),
+    }, 'generation stream opened');
 
     if (job.status === 'completed') {
-      const donePayload: Record<string, unknown> = { jobId, status: job.status, result: job.result };
+      const donePayload: Record<string, unknown> = {
+        jobId,
+        status: job.status,
+        result: job.result,
+        retryCount: job.retryCount ?? 0,
+      };
       if (requestId) {
         donePayload.requestId = requestId;
       }
       res.write(`event: done\ndata: ${JSON.stringify(donePayload)}\n\n`);
       res.end();
-      logger.info({ jobId }, 'generation stream closed (completed)');
+      logger.info({
+        jobId,
+        retryCount: job.retryCount ?? 0,
+        ...(requestId ? { requestId } : {}),
+      }, 'generation stream closed (completed)');
       return;
     }
 
@@ -72,18 +88,24 @@ export const streamJob = async (req: Request, res: Response, next: NextFunction)
       if (requestId) {
         errorPayload.requestId = requestId;
       }
+      errorPayload.retryCount = job.retryCount ?? 0;
       res.write(`event: error\ndata: ${JSON.stringify(errorPayload)}\n\n`);
       const donePayload: Record<string, unknown> = {
         jobId,
         status: job.status,
         code: 'GENERATION_FAILED',
+        retryCount: job.retryCount ?? 0,
       };
       if (requestId) {
         donePayload.requestId = requestId;
       }
       res.write(`event: done\ndata: ${JSON.stringify(donePayload)}\n\n`);
       res.end();
-      logger.warn({ jobId }, 'generation stream closed (failed)');
+      logger.warn({
+        jobId,
+        retryCount: job.retryCount ?? 0,
+        ...(requestId ? { requestId } : {}),
+      }, 'generation stream closed (failed)');
       return;
     }
 
