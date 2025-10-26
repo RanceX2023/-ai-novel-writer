@@ -365,12 +365,16 @@ export const generateChapter = async (req: Request, res: Response, next: NextFun
     const payload = req.body as ChapterGenerationInput;
     const job = await getGenerationService(req).createChapterGenerationJob(projectId, payload);
 
-    getRequestLogger(req).info(
+    const requestLogger = getRequestLogger(req);
+    const requestId = (req as Request & { id?: string }).id;
+
+    requestLogger.info(
       {
         jobId: job.id,
         projectId,
         type: job.type,
         model: payload.model ?? null,
+        ...(requestId ? { requestId } : {}),
       },
       'chapter generation job queued'
     );
@@ -397,13 +401,17 @@ export const continueChapter = async (req: Request, res: Response, next: NextFun
     const payload = req.body as ChapterContinuationInput;
     const job = await getGenerationService(req).createChapterContinuationJob(projectId, chapterId, payload);
 
-    getRequestLogger(req).info(
+    const requestLogger = getRequestLogger(req);
+    const requestId = (req as Request & { id?: string }).id;
+
+    requestLogger.info(
       {
         jobId: job.id,
         projectId,
         chapterId,
         type: job.type,
         model: payload.model ?? null,
+        ...(requestId ? { requestId } : {}),
       },
       'chapter continuation job queued'
     );
