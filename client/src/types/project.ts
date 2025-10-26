@@ -6,6 +6,7 @@ export interface StyleProfile {
   authors: string[];
   styleStrength: number | null;
   language: string | null;
+  model: string | null;
   notes: string | null;
 }
 
@@ -38,5 +39,6 @@ export interface ProjectStylePayload {
   authors?: string[];
   styleStrength?: number;
   language?: string;
+  model?: string;
   notes?: string;
 }

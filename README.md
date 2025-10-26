@@ -42,15 +42,20 @@ pnpm install
 # 或按需分别进入 client/ 与 server/ 目录安装
 ```
 
-2. 配置环境变量（复制 .env.example 为 .env，并填入以下字段）
+2. 配置环境变量（复制 .env.example 为 .env，并按需覆盖）
 ```
 # server 侧必填
 OPENAI_API_KEY=sk-...
 MONGODB_URI=mongodb://localhost:27017/ai-novel-writer
-PORT=3001
 
-# 可选：覆盖默认模型
+# 可选：覆盖默认端口 / 模型
+PORT=3001
 OPENAI_MODEL=gpt-4o-mini
+OPENAI_ALLOWED_MODELS=gpt-4o-mini,gpt-4o
+# 如需使用 OpenAI 代理，设置自定义基址
+OPENAI_BASE_URL=
+# 如需允许请求头覆盖密钥，设置为 true（默认为 false）
+ALLOW_RUNTIME_KEY_OVERRIDE=false
 ```
 > 若前端需要自定义后端地址，可在 `client/.env` 中设置 `VITE_API_BASE_URL`，默认指向 `http://localhost:3001`。
 
@@ -65,7 +70,7 @@ pnpm run dev:client
 > 若脚本命名不同，请以仓库内 package.json 为准；后续任务会统一命名与工作流。
 
 4. 健康检查与调试
-- 后端：GET http://localhost:3001/health → 返回 `{ ok: true }` 代表服务就绪
+- 后端：GET http://localhost:3001/health → 返回 `{ status: 'ok', mongo: 'connected', model: '当前默认模型' }` 等字段代表服务就绪
 - 前端：访问 http://localhost:5173，确认可加载登录/项目列表界面
 - MongoDB：使用 `mongosh` 或 GUI 工具检查 `ai-novel-writer` 数据库是否连通
 - OpenAI：首次调用章节生成接口时若返回鉴权失败，请确认环境变量配置正确
@@ -91,6 +96,9 @@ docker compose up -d
 | ------ | ------ | ---- |
 | `OPENAI_API_KEY` | *(必填)* | OpenAI 密钥，用于生成章节、续写等功能 |
 | `OPENAI_MODEL` | `gpt-4o-mini` | 默认的模型名称，可根据账号权限调整 |
+| `OPENAI_ALLOWED_MODELS` | 同上 | 允许在前端下拉中选择的模型白名单（逗号分隔），会自动包含 `OPENAI_MODEL` |
+| `OPENAI_BASE_URL` | *(空)* | 可选的 OpenAI API 代理/企业网关地址，留空则使用官方基址 |
+| `ALLOW_RUNTIME_KEY_OVERRIDE` | `false` | 是否允许请求头 `X-OpenAI-Key` 临时覆盖密钥；启用后日志与响应会自动脱敏 |
 | `MONGODB_URI` | `mongodb://localhost:27017/ai-novel-writer` | MongoDB 连接串，建议在生产环境中启用鉴权 |
 | `PORT` | `3001` | 后端服务监听端口 |
 | `OPENAI_TIMEOUT_MS` | `60000`（建议值） | 与 OpenAI API 通信的超时时长（可选） |
@@ -98,12 +106,20 @@ docker compose up -d
 
 > 当前重点维护后端环境变量，前端环境变量（如 `VITE_API_BASE_URL`、`VITE_APP_TITLE`）可根据实际需求自行补充。
 
+## 自定义模型 / 端口 / 密钥
+- `PORT` 环境变量控制后端监听端口，`.env.example` 与 `docker-compose.yml` 已同步更新。
+- 通过 `OPENAI_MODEL` + `OPENAI_ALLOWED_MODELS` 管理默认模型与白名单，前端会从 `GET /api/config` 动态拉取并渲染下拉选项，风格设定可为项目单独指定模型。
+- 若配置 `OPENAI_BASE_URL`，OpenAI SDK 会使用自定义基址，可用于企业代理或网络隔离场景。
+- 将 `ALLOW_RUNTIME_KEY_OVERRIDE` 设为 `true` 后，客户端可在请求头携带 `X-OpenAI-Key` 临时覆盖密钥（仅本次请求），日志会自动掩码该字段。
+- `/health` 接口会返回当前默认模型，方便在多环境部署时核对配置。
+
 ## 核心能力与接口（MVP）
 
 ### 项目与风格配置
 - `POST /api/projects`：创建项目，传入项目标题、简介（可选初始风格配置）。
 - `GET /api/projects`：获取项目列表，支持分页与状态筛选（预留）。
 - `GET /api/projects/:id`：获取单个项目详情，包含章节概览、记忆摘要等。
+- `GET /api/config`：返回当前默认模型、白名单以及是否启用运行时密钥覆盖。
 - `POST /api/projects/:id/style`：保存/更新项目风格配置，字段包括语气、节奏、背景设定等。
 
 ### 章节生成与续写（SSE 流式）

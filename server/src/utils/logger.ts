@@ -13,7 +13,12 @@ const logger = pino({
     },
   },
   redact: {
-    paths: ['req.headers.authorization', 'req.headers.cookie'],
+    paths: [
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.headers.x-openai-key',
+      'req.headers["x-openai-key"]',
+    ],
     remove: true,
   },
 });

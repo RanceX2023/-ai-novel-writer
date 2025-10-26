@@ -1,9 +1,12 @@
 import { z } from 'zod';
+import { appConfig } from '../config/appConfig';
 
 export const projectCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   synopsis: z.string().trim().min(1).max(2000).optional(),
 });
+
+const allowedModels = appConfig.openai.allowedModels;
 
 export const projectStyleSchema = z.object({
   tone: z.string().trim().min(1).max(120),
@@ -14,6 +17,17 @@ export const projectStyleSchema = z.object({
   styleStrength: z.number().min(0).max(1).optional(),
   language: z.string().trim().min(2).max(40).optional(),
   notes: z.string().trim().min(1).max(600).optional(),
+  model: allowedModels.length
+    ? z
+        .string()
+        .trim()
+        .min(1)
+        .max(80)
+        .refine((value) => allowedModels.includes(value), {
+          message: `model 必须为以下选项之一：${allowedModels.join(', ')}`,
+        })
+        .optional()
+    : z.string().trim().min(1).max(80).optional(),
 });
 
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;

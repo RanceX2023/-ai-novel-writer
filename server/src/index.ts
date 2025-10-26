@@ -5,8 +5,9 @@ import { connectDatabase } from './config/database';
 import { initialiseOpenAIKeys } from './config/bootstrap';
 import logger from './utils/logger';
 import { flushPendingMetrics, stopMetricsTimer } from './utils/metrics';
+import { appConfig } from './config/appConfig';
 
-const PORT = Number(process.env.PORT || 4000);
+const { port } = appConfig.server;
 
 async function start(): Promise<void> {
   try {
@@ -19,8 +20,8 @@ async function start(): Promise<void> {
     }
 
     const server = http.createServer(app);
-    server.listen(PORT, () => {
-      logger.info({ port: PORT }, '[server] listening');
+    server.listen(port, () => {
+      logger.info({ port }, '[server] listening');
     });
 
     const shutdown = () => {

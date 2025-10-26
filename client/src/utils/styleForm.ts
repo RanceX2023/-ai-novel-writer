@@ -51,6 +51,7 @@ export const styleFormSchema = z.object({
     .trim()
     .min(1, '目标语言不能为空')
     .max(40, '目标语言最多 40 个字符'),
+  model: z.string().trim().max(80).optional(),
 });
 
 export type StyleFormValues = z.infer<typeof styleFormSchema>;
@@ -63,6 +64,7 @@ export const defaultStyleFormValues: StyleFormValues = {
   authorsText: '',
   styleStrength: 0.65,
   language: DEFAULT_STYLE_LANGUAGE,
+  model: '',
 };
 
 export function parseAuthorsInput(value: string): string[] {
@@ -85,11 +87,13 @@ export function styleProfileToFormValues(profile?: StyleProfile | null): StyleFo
     authorsText: Array.isArray(profile.authors) && profile.authors.length ? profile.authors.join('、') : '',
     styleStrength: strength,
     language: profile.language?.trim() || DEFAULT_STYLE_LANGUAGE,
+    model: profile.model?.trim() ?? '',
   };
 }
 
 export function styleFormValuesToPayload(values: StyleFormValues): ProjectStylePayload {
   const authors = parseAuthorsInput(values.authorsText);
+  const model = values.model?.trim();
   return {
     diction: values.diction.trim(),
     tone: values.tone.trim(),
@@ -98,6 +102,7 @@ export function styleFormValuesToPayload(values: StyleFormValues): ProjectStyleP
     authors: authors.length ? authors : undefined,
     styleStrength: clampStrength(values.styleStrength),
     language: values.language.trim() || DEFAULT_STYLE_LANGUAGE,
+    model: model ? model : undefined,
   };
 }
 

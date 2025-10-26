@@ -12,6 +12,7 @@ import CharacterModel, { CharacterAttributes } from '../models/Character';
 import OpenAIService, { StreamChapterOptions, UsageRecord } from './openai';
 import MemoryService from './memoryService';
 import { ChapterContinuationInput, ChapterGenerationInput } from '../validators/chapter';
+import { appConfig } from '../config/appConfig';
 import { chapterMetaJsonSchema, chapterMetaSchema, ChapterMeta } from '../validators/chapterMeta';
 import {
   buildChapterMetaPrompt,
@@ -53,6 +54,10 @@ type MemoryFragmentInput =
   | ChapterGenerationInput['memoryFragments']
   | ChapterContinuationInput['memoryFragments'];
 
+type GenerationRequestOptions = {
+  runtimeApiKey?: string;
+};
+
 interface SseSubscription {
   res: Response;
   heartbeat: NodeJS.Timeout;
@@ -61,6 +66,7 @@ interface SseSubscription {
 interface JobExecutionContext {
   job: GenerationJobDocument;
   signal: AbortSignal;
+  runtimeOptions: GenerationRequestOptions;
 }
 
 class GenerationService {
@@ -79,6 +85,10 @@ class GenerationService {
   private disconnectGraceMs: number;
 
   private costPer1KTokens: number;
+
+  private defaultModel: string;
+
+  private allowedModels: Set<string>;
 
   private logger: Logger;
 
@@ -100,6 +110,8 @@ class GenerationService {
     this.disconnectGraceMs = Math.max(0, Number(process.env.GENERATION_STREAM_DISCONNECT_GRACE_MS ?? 0));
     this.costPer1KTokens = Number(process.env.OPENAI_COST_PER_1K_TOKENS ?? '0') || 0;
     this.logger = logger ?? baseLogger.child({ module: 'generation-service' });
+    this.defaultModel = appConfig.openai.defaultModel;
+    this.allowedModels = new Set(appConfig.openai.allowedModels);
   }
 
   registerStream(jobId: string, res: Response): void {
@@ -168,6 +180,36 @@ class GenerationService {
     this.disconnectTimers.set(jobId, timer);
   }
 
+  private ensureAllowedModel(model: string): string {
+    const trimmed = model.trim();
+    if (!trimmed) {
+      throw new ApiError(400, '模型参数不能为空');
+    }
+    if (!this.allowedModels.has(trimmed)) {
+      throw new ApiError(
+        400,
+        `model 必须为以下选项之一：${Array.from(this.allowedModels).join(', ')}`
+      );
+    }
+    return trimmed;
+  }
+
+  private pickModel(requestedModel?: string | null, styleModel?: string | null): string {
+    if (requestedModel && requestedModel.trim()) {
+      return this.ensureAllowedModel(requestedModel);
+    }
+
+    if (styleModel && styleModel.trim()) {
+      try {
+        return this.ensureAllowedModel(styleModel);
+      } catch (error) {
+        this.logger.warn({ model: styleModel }, 'style profile model is not permitted; falling back to default');
+      }
+    }
+
+    return this.defaultModel;
+  }
+
   private clearDisconnectTimer(jobId: string): void {
     const pending = this.disconnectTimers.get(jobId);
     if (pending) {
@@ -229,7 +271,8 @@ class GenerationService {
 
   async createChapterGenerationJob(
     projectId: string,
-    payload: ChapterGenerationInput
+    payload: ChapterGenerationInput,
+    options: GenerationRequestOptions = {}
   ): Promise<GenerationJobDocument> {
     const project = await ProjectModel.findById(projectId);
     if (!project) {
@@ -269,7 +312,7 @@ class GenerationService {
 
     const additionalOutline = this.buildAdditionalOutline(outlineNodes, outlineNode);
 
-    this.executeJob(job._id.toString(), async ({ job, signal }) => {
+    this.executeJob(job._id.toString(), async ({ job, signal, runtimeOptions }) => {
       const baseChapterTitle = outlineNode.title || (await this.generateChapterTitle(project._id));
       const planning = await this.prepareChapterPlan({
         job,
@@ -289,6 +332,7 @@ class GenerationService {
       const effectiveStyleProfile = planning.styleProfile ?? styleProfile;
       const effectiveTargetLength = planning.targetLength ?? payload.targetLength;
       const resolvedChapterTitle = planning.meta.outline.title?.trim() || baseChapterTitle;
+      const resolvedModel = this.pickModel(payload.model, effectiveStyleProfile?.model ?? styleProfile?.model ?? null);
 
       const metadata = (job.metadata && typeof job.metadata === 'object')
         ? { ...(job.metadata as Record<string, unknown>) }
@@ -298,6 +342,7 @@ class GenerationService {
         fallback: planning.usedFallback,
         targetLength: effectiveTargetLength,
       };
+      metadata.model = resolvedModel;
       if (effectiveStyleProfile) {
         metadata.styleProfileResolved = effectiveStyleProfile;
       }
@@ -332,12 +377,12 @@ class GenerationService {
         continuation: false,
         targetLength: effectiveTargetLength,
         instructions: payload.instructions,
-        model: payload.model,
+        model: resolvedModel,
         chapterMeta: planning.meta,
         signal,
       };
 
-      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength);
+      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength, runtimeOptions);
 
       const chapterDoc = await this.persistNewChapter({
         projectId: project._id,
@@ -376,7 +421,7 @@ class GenerationService {
 
       this.applyUsageToJob(job, streamResult.usage, streamResult.estimatedTokens, streamResult.model);
       await job.save();
-    });
+    }, options);
 
     return job;
   }
@@ -384,7 +429,8 @@ class GenerationService {
   async createChapterContinuationJob(
     projectId: string,
     chapterId: string,
-    payload: ChapterContinuationInput
+    payload: ChapterContinuationInput,
+    options: GenerationRequestOptions = {}
   ): Promise<GenerationJobDocument> {
     const project = await ProjectModel.findById(projectId);
     if (!project) {
@@ -432,7 +478,7 @@ class GenerationService {
       ? this.buildAdditionalOutline(outlineNodes, outlineNode)
       : this.buildRootOutlineContext(outlineNodes);
 
-    this.executeJob(job._id.toString(), async ({ job, signal }) => {
+    this.executeJob(job._id.toString(), async ({ job, signal, runtimeOptions }) => {
       const previousSummary = this.summariseText(chapter.content);
       const planning = await this.prepareChapterPlan({
         job,
@@ -451,6 +497,7 @@ class GenerationService {
 
       const effectiveStyleProfile = planning.styleProfile ?? styleProfile;
       const effectiveTargetLength = planning.targetLength ?? payload.targetLength;
+      const resolvedModel = this.pickModel(payload.model, effectiveStyleProfile?.model ?? styleProfile?.model ?? null);
 
       const metadata = (job.metadata && typeof job.metadata === 'object')
         ? { ...(job.metadata as Record<string, unknown>) }
@@ -460,6 +507,7 @@ class GenerationService {
         fallback: planning.usedFallback,
         targetLength: effectiveTargetLength,
       };
+      metadata.model = resolvedModel;
       if (effectiveStyleProfile) {
         metadata.styleProfileResolved = effectiveStyleProfile;
       }
@@ -495,12 +543,12 @@ class GenerationService {
         previousSummary,
         targetLength: effectiveTargetLength,
         instructions: payload.instructions,
-        model: payload.model,
+        model: resolvedModel,
         chapterMeta: planning.meta,
         signal,
       };
 
-      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength);
+      const streamResult = await this.streamAndCollect(job, promptOptions, effectiveTargetLength, runtimeOptions);
       const updatedChapter = await this.persistContinuation({
         chapter,
         jobId: job._id,
@@ -536,12 +584,16 @@ class GenerationService {
 
       this.applyUsageToJob(job, streamResult.usage, streamResult.estimatedTokens, streamResult.model);
       await job.save();
-    });
+    }, options);
 
     return job;
   }
 
-  private executeJob(jobId: string, handler: (ctx: JobExecutionContext) => Promise<void>): void {
+  private executeJob(
+    jobId: string,
+    handler: (ctx: JobExecutionContext) => Promise<void>,
+    runtimeOptions: GenerationRequestOptions = {}
+  ): void {
     const controller = new AbortController();
     this.jobControllers.set(jobId, controller);
 
@@ -571,7 +623,7 @@ class GenerationService {
       }, 'generation job started');
 
       try {
-        await handler({ job, signal: controller.signal });
+        await handler({ job, signal: controller.signal, runtimeOptions });
 
         job.status = 'completed';
         job.completedAt = new Date();
@@ -1120,7 +1172,14 @@ class GenerationService {
   private async streamAndCollect(
     job: GenerationJobDocument,
     options: StreamChapterOptions,
-    targetLength?: TargetLengthInput
+    targetLength: TargetLengthInput,
+    requestOptions: GenerationRequestOptions
+  ): Promise<{ content: string; usage?: UsageRecord; model: string; estimatedTokens: number; requestId?: string }>;
+  private async streamAndCollect(
+    job: GenerationJobDocument,
+    options: StreamChapterOptions,
+    targetLength?: TargetLengthInput,
+    requestOptions: GenerationRequestOptions = {}
   ): Promise<{ content: string; usage?: UsageRecord; model: string; estimatedTokens: number; requestId?: string }> {
     let tokensGenerated = 0;
     let lastProgress = 0;
@@ -1131,42 +1190,45 @@ class GenerationService {
     const getEffectiveRequestId = () => requestId ?? this.getJobRequestId(job.metadata);
 
     try {
-      const streamResult = await this.openAI.streamChapter({
-        ...options,
-        signal,
-        onRequestId: (value: string) => {
-          requestId = value;
-          this.setJobRequestId(job, value);
-        },
-        onDelta: (delta: string) => {
-          tokensGenerated += this.estimateTokens(delta);
-          const progress = this.estimateProgress(tokensGenerated, targetLength);
-          if (progress > lastProgress) {
-            lastProgress = progress;
-            job.progress = progress;
-            const progressPayload: Record<string, unknown> = {
-              jobId: job.id,
-              progress,
-              tokensGenerated,
+      const streamResult = await this.openAI.streamChapter(
+        {
+          ...options,
+          signal,
+          onRequestId: (value: string) => {
+            requestId = value;
+            this.setJobRequestId(job, value);
+          },
+          onDelta: (delta: string) => {
+            tokensGenerated += this.estimateTokens(delta);
+            const progress = this.estimateProgress(tokensGenerated, targetLength);
+            if (progress > lastProgress) {
+              lastProgress = progress;
+              job.progress = progress;
+              const progressPayload: Record<string, unknown> = {
+                jobId: job.id,
+                progress,
+                tokensGenerated,
+                retryCount: job.retryCount ?? 0,
+              };
+              const effectiveRequestId = getEffectiveRequestId();
+              if (effectiveRequestId) {
+                progressPayload.requestId = effectiveRequestId;
+              }
+              this.emit(job.id, 'progress', progressPayload);
+            }
+            const deltaPayload: Record<string, unknown> = {
+              text: delta,
               retryCount: job.retryCount ?? 0,
             };
             const effectiveRequestId = getEffectiveRequestId();
             if (effectiveRequestId) {
-              progressPayload.requestId = effectiveRequestId;
+              deltaPayload.requestId = effectiveRequestId;
             }
-            this.emit(job.id, 'progress', progressPayload);
-          }
-          const deltaPayload: Record<string, unknown> = {
-            text: delta,
-            retryCount: job.retryCount ?? 0,
-          };
-          const effectiveRequestId = getEffectiveRequestId();
-          if (effectiveRequestId) {
-            deltaPayload.requestId = effectiveRequestId;
-          }
-          this.emit(job.id, 'delta', deltaPayload);
+            this.emit(job.id, 'delta', deltaPayload);
+          },
         },
-      });
+        requestOptions
+      );
 
       if (streamResult.usage) {
         tokensGenerated = Math.max(tokensGenerated, streamResult.usage.completionTokens);
@@ -1545,7 +1607,8 @@ class GenerationService {
       || (base.authors && base.authors.length > 0)
       || typeof base.styleStrength === 'number'
       || (base.instructions && base.instructions.trim())
-      || (base.notes && base.notes.trim());
+      || (base.notes && base.notes.trim())
+      || (base.model && base.model.trim());
 
     const language = base.language?.trim();
 
@@ -1573,6 +1636,9 @@ class GenerationService {
     if (typeof base.styleStrength === 'number') {
       normalised.styleStrength = Math.min(Math.max(base.styleStrength, 0), 1);
     }
+    if (base.model?.trim()) {
+      normalised.model = base.model.trim();
+    }
     if (base.instructions?.trim()) {
       normalised.instructions = base.instructions.trim();
     }
@@ -1599,6 +1665,7 @@ class GenerationService {
         : undefined,
       styleStrength: typeof style.styleStrength === 'number' ? style.styleStrength : undefined,
       language: style.language?.trim() || undefined,
+      model: style.model?.trim() || undefined,
       notes: style.notes?.trim() || undefined,
     };
   }
@@ -1615,6 +1682,7 @@ class GenerationService {
         : undefined,
       styleStrength: typeof profile.styleStrength === 'number' ? profile.styleStrength : undefined,
       language: profile.language?.trim() || undefined,
+      model: profile.model?.trim() || undefined,
       notes: 'notes' in profile ? profile.notes?.trim() || undefined : undefined,
     };
   }

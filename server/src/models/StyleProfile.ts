@@ -10,6 +10,7 @@ export interface StyleProfileAttributes {
   authors?: string[];
   styleStrength?: number;
   language?: string;
+  model?: string;
   notes?: string;
   metadata?: Record<string, unknown> | null;
   createdAt?: Date;
@@ -29,6 +30,7 @@ const StyleProfileSchema = new Schema<StyleProfileAttributes>(
     authors: [{ type: String }],
     styleStrength: { type: Number, min: 0, max: 1 },
     language: { type: String },
+    model: { type: String },
     notes: { type: String },
     metadata: { type: Schema.Types.Mixed },
   },

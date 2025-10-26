@@ -7,6 +7,7 @@ import { nanoid } from 'nanoid';
 import routes from './routes';
 import GenerationService from './services/generationService';
 import OpenAIService from './services/openai';
+import { appConfig } from './config/appConfig';
 import MemoryService from './services/memoryService';
 import PlotService from './services/plotService';
 import OutlineService from './services/outlineService';
@@ -27,6 +28,10 @@ app.disable('x-powered-by');
 
 const requestLogger = pinoHttp({
   logger: appLogger,
+  redact: {
+    paths: ['req.headers.x-openai-key', 'req.headers["x-openai-key"]'],
+    remove: true,
+  },
   genReqId(req, res) {
     const headerId = (req.headers['x-request-id'] as string | undefined)?.trim();
     const requestId = headerId && headerId.length <= 128 ? headerId : nanoid(16);
@@ -121,6 +126,7 @@ app.get('/health', (_req, res) => {
     code: healthy ? 'SERVICE_HEALTHY' : 'SERVICE_UNHEALTHY',
     status: healthy ? 'ok' : 'unhealthy',
     mongo,
+    model: appConfig.openai.defaultModel,
   });
 });
 

@@ -1,6 +1,7 @@
 import OpenAIApiKeyModel from '../models/OpenAIApiKey';
 import OpenAIKeyManager from '../services/openai/apiKeyManager';
 import logger from '../utils/logger';
+import { appConfig } from './appConfig';
 
 export async function initialiseOpenAIKeys(): Promise<void> {
   const secret = process.env.OPENAI_KEY_SECRET;
@@ -9,7 +10,7 @@ export async function initialiseOpenAIKeys(): Promise<void> {
     return;
   }
 
-  const rawApiKey = process.env.OPENAI_API_KEY?.trim();
+  const rawApiKey = appConfig.openai.apiKey?.trim();
   if (!rawApiKey) {
     return;
   }

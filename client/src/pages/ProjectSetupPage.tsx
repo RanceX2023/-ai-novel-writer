@@ -6,6 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { createProject, getProjectStyle, listProjects, saveProjectStyle } from '../api/projects';
+import { getAppConfig } from '../api/config';
 import StyleFormFields from '../components/project/StyleFormFields';
 import { useToast } from '../components/ui/ToastProvider';
 import { HttpError } from '../utils/api';
@@ -48,16 +49,20 @@ function formatTimestamp(value?: string | null): string {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
-function buildStyleSummary(style?: StyleProfile | null): string {
-  if (!style) {
-    return '尚未设置风格参数';
-  }
-  const parts = [style.diction, style.tone, style.pacing, style.pov]
+function buildStyleSummary(style?: StyleProfile | null, fallbackModel?: string): string {
+  const parts = [style?.diction, style?.tone, style?.pacing, style?.pov]
     .map((item) => (item ? item.trim() : ''))
     .filter(Boolean);
+
   if (!parts.length) {
-    return '尚未设置风格参数';
+    parts.push('尚未设置风格参数');
   }
+
+  const modelLabel = style?.model?.trim() || fallbackModel?.trim();
+  if (modelLabel) {
+    parts.push(`模型：${modelLabel}`);
+  }
+
   return parts.join(' · ');
 }
 
@@ -68,6 +73,20 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+
+  const configQuery = useQuery({
+    queryKey: ['app-config'],
+    queryFn: getAppConfig,
+    staleTime: 5 * 60_000,
+  });
+  const configData = configQuery.data;
+  const availableModels = useMemo(() => {
+    if (configData?.models?.length) {
+      return Array.from(new Set(configData.models));
+    }
+    return configData?.defaultModel ? [configData.defaultModel] : [];
+  }, [configData]);
+  const defaultModel = configData?.defaultModel ?? 'gpt-4o-mini';
 
   const projectsQuery = useQuery({
     queryKey: ['project-list'],
@@ -237,7 +256,11 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                 <p className="mt-2 text-xs text-rose-400">{createForm.formState.errors.name.message}</p>
               ) : null}
             </div>
-            <StyleFormFields form={createForm} />
+            <StyleFormFields
+              form={createForm}
+              models={availableModels}
+              defaultModel={defaultModel}
+            />
             <button
               type="submit"
               disabled={isSubmitting}
@@ -281,6 +304,11 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
       </header>
 
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
+        {configQuery.isError ? (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs text-rose-100">
+            模型白名单配置加载失败，已使用默认模型「{defaultModel}」。请检查后端配置或稍后重试。
+          </div>
+        ) : null}
         <section className="grid gap-6 lg:grid-cols-[1.15fr,1fr]">
           <div className="rounded-3xl border border-slate-900/70 bg-slate-950/60 p-6 shadow-xl">
             <div className="flex items-center justify-between">
@@ -325,8 +353,8 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div className="min-w-0">
                               <p className="truncate text-base font-semibold text-slate-100">{project.name}</p>
-                              <p className="mt-1 text-xs text-slate-400">{buildStyleSummary(project.styleProfile)}</p>
-                            </div>
+                              <p className="mt-1 text-xs text-slate-400">{buildStyleSummary(project.styleProfile, defaultModel)}</p>
+
                             <div className="flex flex-col items-end gap-2 text-xs text-slate-500">
                               <span>创建于：{formatTimestamp(project.createdAt)}</span>
                               {defaultProjectId === project.id ? (
@@ -379,6 +407,8 @@ const ProjectSetupPage = ({ defaultProjectId }: ProjectSetupPageProps) => {
                   <StyleFormFields
                     form={styleForm}
                     disabled={!selectedProjectId || styleQuery.isFetching || updateStyleMutation.isPending}
+                    models={availableModels}
+                    defaultModel={defaultModel}
                   />
                 </div>
               ) : (

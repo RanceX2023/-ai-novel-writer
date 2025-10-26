@@ -91,4 +91,71 @@ describe('OpenAIService', () => {
     expect(updatedKey.usageCount).toBe(1);
     expect(updatedKey.totalTokens).toBe(288);
   });
+
+  test('rejects runtime override when disabled', async () => {
+    const service = new OpenAIService({ allowRuntimeKeyOverride: false });
+
+    await expect(
+      service.completeChat(
+        {
+          messages: [{ role: 'user', content: 'ping' }],
+        },
+        { runtimeApiKey: 'sk-disabled' }
+      )
+    ).rejects.toThrow('Runtime OpenAI key overrides are disabled.');
+  });
+
+  test('uses runtime API key override when enabled', async () => {
+    const manager = {
+      getKeyForUse: jest.fn(),
+      markUsage: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const createMock = jest.fn().mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: 'runtime override response',
+          },
+        },
+      ],
+    });
+
+    const clientFactory = jest.fn((apiKey) => {
+      expect(apiKey).toBe('sk-runtime-override');
+      return {
+        chat: {
+          completions: {
+            create: createMock,
+          },
+        },
+      };
+    });
+
+    const usageModel = { create: jest.fn().mockResolvedValue(undefined) };
+
+    const service = new OpenAIService({
+      keyManager: manager,
+      usageModel,
+      clientFactory,
+      allowRuntimeKeyOverride: true,
+      defaultModel: 'gpt-test-model',
+    });
+
+    const result = await service.completeChat(
+      {
+        messages: [
+          { role: 'user', content: 'hello?' },
+        ],
+      },
+      { runtimeApiKey: 'sk-runtime-override' }
+    );
+
+    expect(clientFactory).toHaveBeenCalledTimes(1);
+    expect(manager.getKeyForUse).not.toHaveBeenCalled();
+    expect(manager.markUsage).not.toHaveBeenCalled();
+    expect(usageModel.create).not.toHaveBeenCalled();
+    expect(result.content).toBe('runtime override response');
+    expect(result.keyDocId).toBeUndefined();
+  });
 });
