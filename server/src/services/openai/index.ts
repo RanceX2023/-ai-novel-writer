@@ -240,7 +240,7 @@ class OpenAIService {
   async streamChapter(options: StreamChapterOptions, requestOptions: RequestContextOptions = {}): Promise<StreamChapterResult> {
     const prompt = buildChapterPrompt(options);
     const rawModel = prompt.model ?? this.defaultModel;
-    const model = rawModel.trim();
+    const model = rawModel.trim() || this.defaultModel;
 
     return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {
@@ -322,7 +322,7 @@ class OpenAIService {
     requestOptions: RequestContextOptions = {}
   ): Promise<ChatCompletionResultData> {
     const rawModel = options.model ?? this.defaultModel;
-    const model = rawModel.trim();
+    const model = rawModel.trim() || this.defaultModel;
 
     return this.withClient(async (client, { keyDoc }) => {
       const params: Record<string, unknown> = {

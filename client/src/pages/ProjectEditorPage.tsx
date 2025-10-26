@@ -2249,11 +2249,11 @@ const ProjectEditorPage = () => {
                     不会被保存或上传，仅在生成和续写请求中以 X-OpenAI-Key 头发送。
                   </p>
                 </div>
-              ) : (
+              ) : configQuery.isSuccess ? (
                 <p className="text-xs text-slate-500">
                   平台未启用临时密钥覆盖。如需更换密钥请联系管理员更新服务端配置或环境变量。
                 </p>
-              )}
+              ) : null}
 
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
